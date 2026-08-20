@@ -1,0 +1,11 @@
+export type { ActionDescriptor, EnumerateOptions } from './actions.ts';
+export { enumerateActions, applyAction, actionKey } from './actions.ts';
+export { ObservationEncoder } from './observation.ts';
+export type { Observation, ObservationSpec } from './observation.ts';
+export { GameEnvironment, defaultReward } from './environment.ts';
+export type { StepResult, EnvironmentOptions } from './environment.ts';
+export type { Agent, MatchOptions, MatchResult } from './agent.ts';
+export { playMatch, RandomAgent } from './agent.ts';
+export { HeuristicAgent, DEFAULT_WEIGHTS } from './heuristic.ts';
+export type { HeuristicWeights } from './heuristic.ts';
+export { unitValue, buildingValue, buildThreatMap, captureTargets } from './evaluate.ts';

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0d1117" />
+  <title>Iron Accord</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <header class="bar bar--top">
+    <button id="pick" class="chip" type="button">Maps</button>
+    <button id="newgame" class="chip" type="button">New</button>
+    <span id="title" class="title">loading…</span>
+    <button id="settings" class="chip" type="button">⚙</button>
+  </header>
+
+  <!-- Anchored context menu for unit actions and production. -->
+  <div id="menu" class="menu" hidden role="menu"></div>
+
+  <div id="banner" class="banner" hidden>
+    <div class="banner__inner">
+      <strong id="banner-title"></strong>
+      <span id="banner-text"></span>
+      <button id="banner-close" class="chip" type="button">Dismiss</button>
+    </div>
+  </div>
+
+  <footer class="bar bar--bottom">
+    <span id="status" class="status">—</span>
+    <span class="spacer"></span>
+    <span id="turn" class="turn"></span>
+    <button id="endturn" class="chip chip--primary" type="button" hidden>End turn</button>
+    <button id="fit" class="chip" type="button">Fit</button>
+  </footer>
+
+  <dialog id="settingsDialog">
+    <div class="picker__head"><strong>Settings</strong><span class="spacer"></span>
+      <button id="settingsClose" class="chip" type="button">Close</button></div>
+    <div class="settings">
+      <label><input id="optGrid" type="checkbox" /> Show grid</label>
+      <label><input id="optFog" type="checkbox" /> Fog of war</label>
+      <label><input id="optDim" type="checkbox" checked /> Dim spent units</label>
+      <p class="settings__note">Changing fog restarts the current map.</p>
+    </div>
+  </dialog>
+
+  <dialog id="picker">
+    <div class="picker__head">
+      <input id="search" type="search" placeholder="Search maps" autocomplete="off" />
+      <button id="close" class="chip" type="button">Close</button>
+    </div>
+    <div class="filters">
+      <label>Players
+        <select id="filterPlayers">
+          <option value="">any</option>
+          <option value="2">2</option><option value="3">3</option><option value="4">4</option>
+          <option value="6">6</option><option value="8">8</option>
+        </select>
+      </label>
+      <label>Size
+        <select id="filterSize">
+          <option value="">any</option>
+          <option value="small">small (≤ 20)</option>
+          <option value="medium">medium (21–40)</option>
+          <option value="large">large (&gt; 40)</option>
+        </select>
+      </label>
+      <label>Category
+        <select id="filterCategory"><option value="">any</option></select>
+      </label>
+      <span id="filterCount" class="muted"></span>
+    </div>
+    <ul id="list" class="picker__list"></ul>
+  </dialog>
+
+  <dialog id="setup">
+    <div class="picker__head">
+      <strong id="setupTitle">New game</strong>
+      <span class="spacer"></span>
+      <button id="setupCancel" class="chip" type="button">Cancel</button>
+      <button id="setupStart" class="chip chip--primary" type="button">Start</button>
+    </div>
+    <div class="setup">
+      <div class="setup__row">
+        <label>Fog
+          <select id="cfgFog">
+            <option value="off">Off</option>
+            <option value="war">Fog of war</option>
+            <option value="shroud">Shroud</option>
+          </select>
+        </label>
+        <label>Starting funds
+          <input id="cfgFunds" type="number" min="0" max="999999" step="1000" value="0" />
+          <span id="cfgFundsHint" class="hint"></span>
+        </label>
+        <label>Unit limit
+          <input id="cfgUnitLimit" type="number" min="0" max="999" step="5" value="0" />
+          <span id="cfgUnitLimitHint" class="hint"></span>
+        </label>
+        <label>Income
+          <select id="cfgIncome">
+            <option value="0.5">50%</option>
+            <option value="1" selected>100%</option>
+            <option value="1.5">150%</option>
+            <option value="2">200%</option>
+          </select>
+        </label>
+      </div>
+      <table class="seats">
+        <thead><tr><th>Seat</th><th>Army</th><th>Team</th><th>Controller</th></tr></thead>
+        <tbody id="seatRows"></tbody>
+      </table>
+      <p class="settings__note" id="setupNote"></p>
+    </div>
+  </dialog>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

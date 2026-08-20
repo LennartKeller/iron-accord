@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Generated from the Commander_Wars submodule by `npm run build:data`.
+# ~2000 files that are reproducible in one command, so they stay out of git.
+data/
