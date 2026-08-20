@@ -19,6 +19,7 @@ const GRID: Record<keyof HeuristicWeights, number[]> = {
   captureWeight: [0.7, 1.0, 1.4, 2.0],
   coverWeight: [30, 60, 90, 140, 200],
   reserveFunds: [0, 1000, 3000],
+  transportWeight: [0, 1, 2],
 };
 
 const show = (s: Score) => `${s.wins}W ${s.losses}L ${s.draws}D  rate ${rate(s).toFixed(3)}`;

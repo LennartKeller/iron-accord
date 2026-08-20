@@ -35,6 +35,12 @@ export interface HeuristicWeights {
   coverWeight: number;
   /** Funds kept back rather than spent on the cheapest available unit. */
   reserveFunds: number;
+  /**
+   * How hard to push ferrying infantry across water. Zero falls back to a flat
+   * value for boarding and no special handling for landing, which is how the
+   * agent behaved before transports were scored at all.
+   */
+  transportWeight: number;
 }
 
 export const DEFAULT_WEIGHTS: HeuristicWeights = {
@@ -44,6 +50,7 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   captureWeight: 1.0,
   coverWeight: 90,
   reserveFunds: 0,
+  transportWeight: 1,
 };
 
 interface TurnContext {
@@ -217,11 +224,12 @@ export class HeuristicAgent implements Agent {
     const transport = env.game.map.getUnitAt(action.to.x, action.to.y);
     if (!transport) return 0;
 
+    if (this.weights.transportWeight === 0) return 60;
     const stranded = !context.navigator.canReachGoal(unit);
     // Only useful if the ride is going somewhere the passenger cannot reach.
     const ferryable = context.dropOffs.canReachGoal(transport);
     if (!stranded) return canCapture(unit) ? 40 : 20;
-    return ferryable ? 1500 : 0;
+    return (ferryable ? 1500 : 0) * this.weights.transportWeight;
   }
 
   /**
@@ -232,6 +240,7 @@ export class HeuristicAgent implements Agent {
     env: GameEnvironment, context: TurnContext, unit: Unit, action: ActionDescriptor,
   ): number {
     if (action.kind !== 'unit' || !action.steps?.length) return 0;
+    if (this.weights.transportWeight === 0) return this.scorePosition(env, context, unit, action) * 0.5;
     const site = action.steps[0];
     if (typeof site === 'string') return 0;
 
@@ -240,7 +249,7 @@ export class HeuristicAgent implements Agent {
     const after = context.navigator.distance(cargo, site.x, site.y);
     if (after === UNREACHABLE) return 0;
     // Landing next to the objective beats landing across the island from it.
-    return 1200 - after * 20;
+    return (1200 - after * 20) * this.weights.transportWeight;
   }
 
   /** Merging two damaged units recovers value only if both are hurt. */
