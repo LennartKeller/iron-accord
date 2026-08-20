@@ -2,6 +2,11 @@
   --bg: #0d1117;
   --panel: rgba(22, 27, 34, 0.92);
   --line: rgba(255, 255, 255, 0.12);
+  /* env() is not readable from script, so mirror the insets into variables. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
   --text: #e6edf3;
   --muted: #8b949e;
   color-scheme: dark;
@@ -75,6 +80,7 @@ html, body {
 dialog {
   width: min(560px, 92vw);
   max-height: 76vh;
+  max-height: 76dvh;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -89,7 +95,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
   flex: 1; padding: 8px 12px; border-radius: 8px;
   border: 1px solid var(--line); background: #0d1117; color: var(--text); font: inherit;
 }
-.picker__list { margin: 0; padding: 0; list-style: none; overflow: auto; max-height: 60vh; }
+.picker__list { margin: 0; padding: 0; list-style: none; overflow: auto; max-height: 60vh; max-height: 60dvh; }
 .picker__list li { border-bottom: 1px solid var(--line); }
 .picker__list button {
   width: 100%; text-align: left; background: none; border: 0; color: inherit;
@@ -120,9 +126,18 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* A factory lists more units than fit on a phone, so the menu scrolls rather
+     than running off the screen. openMenu sets the height it actually gets. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* The canvas sets touch-action: none to own its gestures; the menu needs the
+     opposite, or a capped list cannot be scrolled by thumb. */
+  touch-action: pan-y;
+  max-width: calc(100vw - 16px - var(--safe-left) - var(--safe-right));
 }
 .menu button {
   appearance: none;
+  flex: none;
   border: 0;
   background: none;
   color: var(--text);
@@ -184,7 +199,7 @@ select, .setup input {
 }
 
 /* --- game setup ---------------------------------------------------------- */
-.setup { padding: 14px; display: flex; flex-direction: column; gap: 14px; overflow: auto; max-height: 60vh; }
+.setup { padding: 14px; display: flex; flex-direction: column; gap: 14px; overflow: auto; max-height: 60vh; max-height: 60dvh; }
 .setup__row { display: flex; flex-wrap: wrap; gap: 12px; }
 .setup__row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .setup__row input { width: 130px; }

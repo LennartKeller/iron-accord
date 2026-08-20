@@ -297,12 +297,36 @@ function openMenu(screen: { x: number; y: number }, items: MenuItem[]): void {
   }));
   menuEl.hidden = false;
 
-  // Keep the menu on screen near the tap.
+  // Fit it to the band between the two bars before measuring, so a long build
+  // list becomes a scrolling menu instead of one that runs off the screen. The
+  // bars are measured rather than assumed: that picks up their real height and
+  // the safe-area padding they already carry on a notched phone.
+  const gap = 8;
+  const top = $('.bar--top').getBoundingClientRect().bottom + gap;
+  const bottom = $('.bar--bottom').getBoundingClientRect().top - gap;
+  const left = gap + safeInset('--safe-left');
+  const right = window.innerWidth - gap - safeInset('--safe-right');
+  menuEl.style.maxHeight = `${Math.max(MIN_MENU_HEIGHT, bottom - top)}px`;
+
+  // Clamp low-then-high: on a screen too short for the menu the upper bound
+  // goes past the lower one, and the tap position must lose to the top edge.
   const rect = menuEl.getBoundingClientRect();
-  const x = Math.min(Math.max(8, screen.x + 12), window.innerWidth - rect.width - 8);
-  const y = Math.min(Math.max(8, screen.y + 12), window.innerHeight - rect.height - 8);
+  const x = clamp(screen.x + 12, left, Math.max(left, right - rect.width));
+  const y = clamp(screen.y + 12, top, Math.max(top, bottom - rect.height));
   menuEl.style.left = `${x}px`;
   menuEl.style.top = `${y}px`;
+}
+
+/** Enough for two or three rows; below this, scrolling beats vanishing. */
+const MIN_MENU_HEIGHT = 120;
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
+
+/** Reads a safe-area inset, which env() only exposes to CSS. */
+function safeInset(name: string): number {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name);
+  return Number.parseFloat(raw) || 0;
 }
 
 function closeMenu(): void {
