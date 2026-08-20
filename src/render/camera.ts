@@ -49,6 +49,17 @@ export class Camera {
     this.y = clamp(this.y, -marginY, worldHeight + marginY);
   }
 
+  /**
+   * Smallest scale `fit` will choose.
+   *
+   * Fitting a 70x40 map into a phone-sized viewport wants a scale near 1, which
+   * makes each tile 16 CSS pixels — about 4mm, far too small to hit with a
+   * thumb, and half a tile is already past the drag threshold so taps turn into
+   * pans. Big maps therefore start zoomed in and pannable rather than fully
+   * visible; `minScale` still allows pinching out to an overview deliberately.
+   */
+  minFitScale = 2.5;
+
   /** Scale at which the whole map fits, with padding. */
   fitScale(worldWidth: number, worldHeight: number, padding = 24): number {
     const sx = (this.viewport.width - padding) / worldWidth;
@@ -56,8 +67,10 @@ export class Camera {
     return clamp(Math.min(sx, sy), this.minScale, this.maxScale);
   }
 
+  /** Frames the map at a scale that is still comfortable to touch. */
   fit(worldWidth: number, worldHeight: number, padding = 24): void {
-    this.scale = this.fitScale(worldWidth, worldHeight, padding);
+    const fitted = this.fitScale(worldWidth, worldHeight, padding);
+    this.scale = clamp(Math.max(fitted, this.minFitScale), this.minScale, this.maxScale);
     this.x = worldWidth / 2;
     this.y = worldHeight / 2;
   }

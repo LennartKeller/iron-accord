@@ -912,7 +912,8 @@ async function main(): Promise<void> {
 
   const requested = initial.get('map');
   const startup = index.find(e => e.id === requested)
-    ?? index.find(e => e.category === 'pre-deployed')
+    // Categories come from the map directory names, which use underscores.
+    ?? index.find(e => e.category === 'pre_deployed')
     ?? index[0];
   if (startup) {
     currentMapId = startup.id;

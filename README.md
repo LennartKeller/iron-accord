@@ -62,7 +62,7 @@ offline after the first visit.
 ```bash
 npm run build:data    # 570 maps + 688 sprites -> 6.6 MB in data/
 npm run dev           # dev server; open the printed URL
-npm test              # 112 tests
+npm test              # 115 tests
 npm run typecheck
 ```
 
@@ -281,6 +281,13 @@ shows up as a warning and a half-applied action rather than a crash. Playing
 random games and counting the warnings is the fastest way to find them — it took
 the count from 259 to 0. `ACTION_CANNON_FIRE` gating on `getFireCount` is the
 canonical example: without it the damage lands and the cooldown never ticks.
+
+**Fitting a big map makes tiles untappable.** A 70x40 board fits a tablet
+viewport at roughly scale 1, which is 16 CSS pixels per tile — about 4mm, and
+narrower than two drag thresholds, so a thumb tap registers as a pan and the
+board appears to ignore input entirely. `Camera.fit` therefore has a floor
+(`minFitScale`): large maps open zoomed in and pannable rather than fully
+visible. `minScale` is lower, so pinching out to an overview still works.
 
 **A late-arriving sprite must request a repaint.** `render()` is synchronous and
 peeks a decoded-sprite cache, so a sprite requested for the first time is missing

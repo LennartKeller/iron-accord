@@ -50,14 +50,37 @@ describe('Camera', () => {
     expect(camera.y).toBeCloseTo(5, 6);
   });
 
-  it('fits a map inside the viewport', () => {
+  it('centres on the map when fitting', () => {
     const camera = new Camera(viewport);
     camera.fit(30 * 16, 20 * 16);
     expect(camera.x).toBeCloseTo(240, 6);
     expect(camera.y).toBeCloseTo(160, 6);
-    // The whole map must be on screen at the fitted scale.
-    expect(30 * 16 * camera.scale).toBeLessThanOrEqual(viewport.width);
-    expect(20 * 16 * camera.scale).toBeLessThanOrEqual(viewport.height);
+  });
+
+  it('shows a small map whole', () => {
+    const camera = new Camera(viewport);
+    // A 10x10 board fits comfortably, so nothing is clipped.
+    camera.fit(10 * 16, 10 * 16);
+    expect(10 * 16 * camera.scale).toBeLessThanOrEqual(viewport.width);
+    expect(10 * 16 * camera.scale).toBeLessThanOrEqual(viewport.height);
+  });
+
+  it('never fits so far out that tiles become untappable', () => {
+    const camera = new Camera(viewport);
+    // A 70x40 map would otherwise fit at scale ~1, making each tile 16 CSS px —
+    // roughly 4mm on a tablet, and less than two drag thresholds wide, so taps
+    // turn into pans. Big maps start zoomed in and pannable instead.
+    camera.fit(70 * 16, 40 * 16);
+    expect(camera.scale).toBeGreaterThanOrEqual(camera.minFitScale);
+    expect(16 * camera.scale).toBeGreaterThanOrEqual(32);
+  });
+
+  it('still allows pinching out past the fit floor', () => {
+    const camera = new Camera(viewport);
+    camera.fit(70 * 16, 40 * 16);
+    for (let i = 0; i < 20; i++) camera.zoomAt(400, 300, 0.7);
+    expect(camera.scale).toBe(camera.minScale);
+    expect(camera.minScale).toBeLessThan(camera.minFitScale);
   });
 
   it('clamps panning to near the map bounds', () => {
