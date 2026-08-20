@@ -47,7 +47,10 @@ submodule, regenerates `data/` from it, and builds the site for the
 `/<repo>/` path a project site is served from — `data/` is generated rather
 than committed, so the submodule is what the deploy actually depends on.
 
-Enable it once under Settings → Pages → Source → GitHub Actions.
+The workflow enables Pages itself via `actions/configure-pages`, so there is
+nothing to switch on by hand. If your account or organisation blocks that, do it
+once under Settings → Pages → Source → GitHub Actions instead — the symptom of
+it being off is a successful build followed by the deploy failing with a 404.
 
 The site is a PWA: a manifest, icons and a service worker that precaches the
 shell, the script bundle and all 688 sprites (~1.5 MB), then caches map scenes

@@ -26,6 +26,13 @@ jobs:
           # tools/build-data.ts turns into data/. Without it there is no game.
           submodules: recursive
 
+      # Turns Pages on if it has not been configured yet. Without this the
+      # build succeeds, the artifact uploads, and the deploy then 404s because
+      # the repository has no Pages site to deploy to.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
