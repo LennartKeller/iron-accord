@@ -418,7 +418,20 @@ async function maybeRunAI(): Promise<void> {
         break;
       }
 
-      applyAction(game, chosen);
+      // If the chosen action is no longer legal, selecting again would return
+      // the same one forever and hold the board hostage for guard x 160ms.
+      if (!applyAction(game, chosen)) {
+        console.warn('AI proposed an action that could not be applied; ending its turn', chosen);
+        game.endTurn();
+        resetInteraction();
+        syncBuildings();
+        syncUnits();
+        syncTurn();
+        checkBanner();
+        requestRender();
+        break;
+      }
+
       resetInteraction();
       syncBuildings();
       syncUnits();
@@ -916,6 +929,20 @@ async function main(): Promise<void> {
       }
     }
     await loadScene(startup.id);
+  }
+
+  // ?tap=x,y synthesises a real pointer gesture on a tile, so the whole input
+  // path (PointerControls included) can be exercised without a human finger.
+  const tapAt = parsePoint(initial.get('tap'));
+  if (tapAt) {
+    const screen = renderer.camera.worldToScreen(tapAt.x * 16 + 8, tapAt.y * 16 + 8);
+    const rect = canvas.getBoundingClientRect();
+    const shared = {
+      pointerId: 1, pointerType: 'touch', isPrimary: true, bubbles: true, cancelable: true,
+      clientX: rect.left + screen.x, clientY: rect.top + screen.y,
+    };
+    canvas.dispatchEvent(new PointerEvent('pointerdown', shared));
+    canvas.dispatchEvent(new PointerEvent('pointerup', shared));
   }
 
   // ?ui=maps|setup|settings opens a dialog on load, so any screen can be
