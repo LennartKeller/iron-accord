@@ -1,0 +1,3 @@
+[submodule "ext/Commander_Wars"]
+	path = ext/Commander_Wars
+	url = git@github.com:Robosturm/Commander_Wars.git
