@@ -9,6 +9,7 @@ import { gameMapFromScene } from '../src/game/fromscene.ts';
 import { resolveBuildingSprites, resolveUnitSprites } from '../src/maps/loadmap.ts';
 import { Game, type ActionStep } from '../src/game/game.ts';
 import { describeVictoryRules, type VictoryRuleInfo } from '../src/game/victory.ts';
+import { threatenedTiles } from '../src/game/threat.ts';
 import { GameEnvironment, HeuristicAgent, applyAction, enumerateActions } from '../src/ai/index.ts';
 import { defaultConfig, sanitizeConfig, LIMITS, type GameConfig, type SeatController } from '../src/game/config.ts';
 import { GameEnums, type AnimationRunner, type Unit } from '../src/host/index.ts';
@@ -266,6 +267,9 @@ function describe(tile: { x: number; y: number } | null): void {
     // looks like nothing happened at all.
     if (unit.getCapturePoints() > 0) parts.push(`capturing ${unit.getCapturePoints()}/20`);
     if (unit.hasMoved) parts.push('done');
+    if (unit === inspected) {
+      parts.push(unit.canMoveAndFire() ? 'reach shown' : 'firing range shown');
+    }
   }
   statusEl.textContent = parts.join(' · ');
 }
@@ -336,6 +340,7 @@ function closeMenu(): void {
 
 function resetInteraction(): void {
   mode = 'idle';
+  inspected = null;
   actor = null;
   destination = null;
   unloadIndex = -1;
@@ -549,6 +554,43 @@ function openBuildMenu(screen: { x: number; y: number }, tile: { x: number; y: n
   openMenu(screen, items);
 }
 
+/**
+ * The enemy whose reach is on display. Tapping one is a look, not a move: it
+ * changes nothing about the turn, so it is kept apart from `actor`.
+ */
+let inspected: Unit | null = null;
+
+/**
+ * Tiles it can shoot from where it stands, and tiles it must move to first.
+ * A danger zone covers a lot of board, so the reach is a light wash and only
+ * what is already in range is stated at full strength.
+ */
+const THREAT_NOW = { color: '#f85149', alpha: 0.5 };
+const THREAT_AFTER_MOVE = { color: '#f85149', alpha: 0.22 };
+
+/**
+ * Shows what a spotted enemy could hit next turn, if the tapped tile holds one.
+ *
+ * Only units the current player can actually see: under fog, tapping a tile
+ * where an enemy happens to be standing must reveal nothing at all.
+ */
+function showThreatOf(tile: { x: number; y: number }): boolean {
+  if (!game) return false;
+  const unit = game.unitAt(tile.x, tile.y);
+  if (!unit || !game.currentPlayer.isEnemy(unit.getOwner())) return false;
+  if (fogEnabled() && !game.currentPlayer.getFieldVisible(unit.x, unit.y)) return false;
+
+  const threatened = threatenedTiles(game.map, unit);
+  if (threatened.length === 0) return false;      // a transport has no weapon
+
+  inspected = unit;
+  renderer.highlights = threatened.map(threat => ({
+    x: threat.x, y: threat.y,
+    ...(threat.fromHere ? THREAT_NOW : THREAT_AFTER_MOVE),
+  }));
+  return true;
+}
+
 function onTap(screenX: number, screenY: number): void {
   // The board is read-only while the AI is thinking.
   if (aiRunning) return;
@@ -613,6 +655,8 @@ function onTap(screenX: number, screenY: number): void {
     mode = 'moving';
     actor = game.selected;
     showRange();
+  } else if (showThreatOf(tile)) {
+    // Nothing else to do: the overlay is the whole interaction.
   } else if (game.canProduceAt(tile.x, tile.y)) {
     openBuildMenu({ x: screenX, y: screenY }, tile);
   }

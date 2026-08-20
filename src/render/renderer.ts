@@ -22,6 +22,8 @@ export interface Highlight {
   y: number;
   /** CSS colour, drawn semi-transparent over the tile. */
   color: string;
+  /** Overrides the default opacity, for overlays that cover a lot of board. */
+  alpha?: number;
 }
 
 export class SceneRenderer {
@@ -359,8 +361,8 @@ export class SceneRenderer {
 
   private drawHighlights(ctx: CanvasRenderingContext2D): void {
     ctx.save();
-    ctx.globalAlpha = 0.45;
     for (const highlight of this.highlights) {
+      ctx.globalAlpha = highlight.alpha ?? 0.45;
       ctx.fillStyle = highlight.color;
       ctx.fillRect(highlight.x * TILE_SIZE, highlight.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
     }

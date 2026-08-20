@@ -316,6 +316,14 @@ export class Unit {
 
   getMinRange(_position?: QPoint): number { return this.minRange; }
   getMaxRange(_position?: QPoint): number { return this.maxRange; }
+  /**
+   * game/unit.cpp: Unit::hasWeapons — whether the unit is armed at all.
+   *
+   * Range is not the test: every unit script calls setMinRange/setMaxRange,
+   * armed or not, so an APC declares range 1 while carrying no weapon.
+   */
+  hasWeapons(): boolean { return this.weapon1ID !== '' || this.weapon2ID !== ''; }
+
   hasAmmo1(): boolean { return this.maxAmmo1 <= 0 || this.ammo1 > 0; }
   hasAmmo2(): boolean { return this.maxAmmo2 <= 0 || this.ammo2 > 0; }
   hasDirectWeapon(): boolean { return this.maxRange <= 1; }

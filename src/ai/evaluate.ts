@@ -1,6 +1,7 @@
 import type { Game } from '../game/game.ts';
 import type { Unit, Player, Building } from '../host/index.ts';
 import { computeMovementRange } from '../game/pathfinding.ts';
+import { threatenedTiles } from '../game/threat.ts';
 
 /**
  * Scoring primitives the heuristic agent reasons with.
@@ -61,34 +62,14 @@ export function buildThreatMap(game: Game, self: Player): ThreatMap {
     if (!self.isEnemy(player) || player.isDefeated) continue;
 
     for (const enemy of player.units) {
-      // Where the enemy could stand after moving, then what it could reach.
-      const range = computeMovementRange(map, enemy);
-      const reach = enemy.getMaxRange();
-      const minRange = enemy.getMinRange();
       // Each enemy able to reach the tile contributes about one attack's worth.
       const contribution = TYPICAL_HIT * (enemy.getHp() / 10);
-
-      const from = enemy.canMoveAndFire()
-        ? [...range.tiles.values()].filter(tile => tile.canStop)
-        : [{ x: enemy.x, y: enemy.y, cost: 0, canStop: true, canAct: true }];
-
-      const seen = new Set<number>();
-      for (const origin of from) {
-        for (let dy = -reach; dy <= reach; dy++) {
-          for (let dx = -reach; dx <= reach; dx++) {
-            const distance = Math.abs(dx) + Math.abs(dy);
-            if (distance < minRange || distance > reach) continue;
-            const x = origin.x + dx;
-            const y = origin.y + dy;
-            if (!map.onMap(x, y)) continue;
-            const index = y * map.width + x;
-            if (seen.has(index)) continue;
-            seen.add(index);
-            // A tile threatened by several units is worse than one threatened
-            // once, so these accumulate — capped when read.
-            threat[index] += contribution;
-          }
-        }
+      // Shared with the range overlay the UI draws for a tapped enemy, so the
+      // AI and the player are reading the same board.
+      for (const tile of threatenedTiles(map, enemy)) {
+        // A tile threatened by several units is worse than one threatened
+        // once, so these accumulate — capped when read.
+        threat[tile.y * map.width + tile.x] += contribution;
       }
     }
   }
