@@ -18,11 +18,17 @@ export type RuleInputType = 'checkbox' | 'spinbox';
 export class VictoryRule {
   private readonly variables = new ScriptVariables();
 
-  constructor(
-    readonly ruleID: string,
-    private readonly map: GameMap,
-    private readonly registry: ScriptRegistry,
-  ) {
+  // Written out rather than declared as constructor parameter properties:
+  // `npm run build:data` runs this file through Node's type stripping, which
+  // erases types but cannot generate the assignments those imply.
+  readonly ruleID: string;
+  private readonly map: GameMap;
+  private readonly registry: ScriptRegistry;
+
+  constructor(ruleID: string, map: GameMap, registry: ScriptRegistry) {
+    this.ruleID = ruleID;
+    this.map = map;
+    this.registry = registry;
     this.init();
   }
 
