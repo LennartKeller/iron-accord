@@ -618,6 +618,29 @@ export class Unit {
   }
 
   /**
+   * game/unit.cpp: Unit::removeUnit — takes this unit off the board.
+   *
+   * Scripts call it on themselves: ACTION_JOIN merges one unit's fuel, ammo and
+   * health into another and then removes the donor. Without this the donor
+   * stayed, so a join handed out a free unit's worth of material — and because
+   * the failure happened in an animation callback it was logged and swallowed
+   * rather than thrown.
+   *
+   * `killed` distinguishes being destroyed from being consumed: only a death
+   * runs the unit's onDeath hook and takes its passengers down with it.
+   */
+  removeUnit(killed = false): void {
+    if (killed) {
+      try { this.map.registry[this.unitID]?.onDeath?.(this, this.map); } catch { /* script gap */ }
+      try { this.map.registry.PLAYER?.onUnitDeath?.(this.owner, this, this.map); } catch { /* ditto */ }
+      // Passengers go down with the ship.
+      for (const carried of [...this.loaded]) carried.removeUnit(true);
+    }
+    this.loaded.length = 0;
+    this.map.removeUnit(this);
+  }
+
+  /**
    * game/unit.cpp: Unit::spawnUnit — creates a unit directly into this one's
    * hold, without a factory and without paying for it.
    *

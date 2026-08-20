@@ -18,7 +18,7 @@ const GRID: Record<keyof HeuristicWeights, number[]> = {
   advanceWeight: [70, 100, 140, 200, 280],
   captureWeight: [0.7, 1.0, 1.4, 2.0],
   coverWeight: [30, 60, 90, 140, 200],
-  reserveFunds: [0, 1000, 3000],
+  reserveFunds: [0, 500, 1500, 4000],
   transportWeight: [0, 1, 2],
 };
 
@@ -46,6 +46,10 @@ for (const pass of [1, 2]) {
 }
 
 console.log('\nFINAL', JSON.stringify(best, null, 2), 'train rate', bestRate.toFixed(3));
+
+// Every individual change that looked good, retested on its own over the whole
+// suite: a combination can win on the training maps because its parts cancel
+// each other's mistakes there, which is not a property that travels.
 
 // Held-out check. Weights that only win on the boards they were fitted to are
 // worth nothing, so the number that counts is this one.

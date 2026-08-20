@@ -539,3 +539,31 @@ describe('game configuration', () => {
     expect(game.canProduceAt(factory.x, factory.y)).toBe(true);
   });
 });
+
+describe('join', () => {
+  it('removes the unit that was merged away', () => {
+    // ACTION_JOIN moves the donor's fuel, ammo and health into the target and
+    // then removes it. When removeUnit was missing from the host the transfer
+    // still happened and the donor stayed on the board, so joining conjured a
+    // whole extra unit — and the failure was swallowed by the animation
+    // callback rather than raised.
+    const { map, game } = newGame();
+    const player = map.getPlayer(0)!;
+    for (const unit of [...map.units]) map.removeUnit(unit);
+
+    const keeper = map.addUnit('INFANTRY', player, 4, 4);
+    const donor = map.addUnit('INFANTRY', player, 4, 5);
+    keeper.setHp(4);
+    donor.setHp(5);
+    map.vision.update();
+
+    const before = map.units.length;
+    expect(game.select(donor.x, donor.y)).toBeTruthy();
+    game.beginAction('ACTION_JOIN', donor, { x: keeper.x, y: keeper.y });
+
+    expect(map.units.length).toBe(before - 1);
+    expect(map.units).not.toContain(donor);
+    expect(player.units).not.toContain(donor);
+    expect(Math.round(keeper.getHp())).toBe(9);
+  });
+});
