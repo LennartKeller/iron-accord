@@ -41,12 +41,25 @@ export class Camera {
     this.y -= screenDy / this.scale;
   }
 
-  /** Keeps the map roughly on screen, allowing a small margin past the edges. */
+  /**
+   * Keeps the board filling the screen.
+   *
+   * Along an axis where the map is smaller than the viewport it is centred; on
+   * a larger one the camera is held inside the map's bounds. Without the second
+   * rule, centring on a corner unit — which is exactly what the next-unit cycle
+   * does — leaves most of the screen showing empty space beyond the edge.
+   */
   clampTo(worldWidth: number, worldHeight: number): void {
-    const marginX = Math.min(worldWidth / 2, this.viewport.width / (2 * this.scale));
-    const marginY = Math.min(worldHeight / 2, this.viewport.height / (2 * this.scale));
-    this.x = clamp(this.x, -marginX, worldWidth + marginX);
-    this.y = clamp(this.y, -marginY, worldHeight + marginY);
+    const visibleWidth = this.viewport.width / this.scale;
+    const visibleHeight = this.viewport.height / this.scale;
+
+    this.x = worldWidth <= visibleWidth
+      ? worldWidth / 2
+      : clamp(this.x, visibleWidth / 2, worldWidth - visibleWidth / 2);
+
+    this.y = worldHeight <= visibleHeight
+      ? worldHeight / 2
+      : clamp(this.y, visibleHeight / 2, worldHeight - visibleHeight / 2);
   }
 
   /**

@@ -83,12 +83,35 @@ describe('Camera', () => {
     expect(camera.minScale).toBeLessThan(camera.minFitScale);
   });
 
-  it('clamps panning to near the map bounds', () => {
+  it('holds the camera inside a map larger than the viewport', () => {
     const camera = new Camera(viewport);
-    camera.scale = 8;
+    camera.scale = 4;                       // 200x150 world units visible
+    const world = { w: 2000, h: 1500 };
     camera.x = 100_000; camera.y = -100_000;
-    camera.clampTo(480, 320);
-    expect(camera.x).toBeLessThanOrEqual(480 + 240);
-    expect(camera.y).toBeGreaterThanOrEqual(-160);
+    camera.clampTo(world.w, world.h);
+
+    // The visible rectangle must lie entirely within the board — no void.
+    expect(camera.x - 100).toBeGreaterThanOrEqual(0);
+    expect(camera.x + 100).toBeLessThanOrEqual(world.w);
+    expect(camera.y - 75).toBeGreaterThanOrEqual(0);
+    expect(camera.y + 75).toBeLessThanOrEqual(world.h);
+  });
+
+  it('centres a map smaller than the viewport instead of letting it drift', () => {
+    const camera = new Camera(viewport);
+    camera.scale = 8;                       // 100x75 world units visible
+    camera.x = 5000; camera.y = -5000;
+    camera.clampTo(60, 50);                 // smaller than the view on both axes
+    expect(camera.x).toBeCloseTo(30, 6);
+    expect(camera.y).toBeCloseTo(25, 6);
+  });
+
+  it('clamps and centres independently per axis', () => {
+    const camera = new Camera(viewport);
+    camera.scale = 8;                       // 100x75 world units visible
+    camera.x = 5000; camera.y = -5000;
+    camera.clampTo(300, 50);                // wide board, short board
+    expect(camera.x).toBeCloseTo(250, 6);   // held inside: 300 - 100/2
+    expect(camera.y).toBeCloseTo(25, 6);    // centred
   });
 });

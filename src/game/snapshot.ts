@@ -54,6 +54,8 @@ export interface GameState {
   over: Game['over'];
   fogMode: number;
   players: PlayerState[];
+  /** Each victory rule's script variables, which is all the state they have. */
+  victoryRules: Array<{ ruleID: string; variables: Record<string, unknown> }>;
   units: UnitState[];
   /** Only buildings whose mutable state can change; terrain ids never do. */
   buildings: BuildingState[];
@@ -107,6 +109,10 @@ export function snapshot(game: Game): GameState {
       funds: player.funds,
       isDefeated: player.isDefeated,
     })),
+    // The defeat rules latch on and never off — victoryrule_nohq.js only
+    // applies to a player who has ever owned an HQ — so a snapshot taken
+    // before that happened has to restore the un-armed latch with it.
+    victoryRules: map.getGameRules().victoryRuleState(),
     units: map.units.map(captureUnit),
     buildings,
   };
@@ -156,6 +162,8 @@ export function restore(game: Game, state: GameState): void {
     player.isDefeated = playerState.isDefeated;
     player.units.length = 0;
   });
+
+  map.getGameRules().setVictoryRuleState(state.victoryRules);
 
   map.units.length = 0;
   for (const unitState of state.units) restoreUnit(map, unitState);

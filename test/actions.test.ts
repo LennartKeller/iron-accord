@@ -311,6 +311,89 @@ describe('victory', () => {
     expect(over!.winner).toBe(0);
     expect(map.getPlayer(1)!.isDefeated).toBe(true);
   });
+
+  it('spares a player who never owned an HQ', () => {
+    // Several stock maps hand out fewer HQs than they have players. 8-Bridge
+    // Isles ships exactly one, red's, so this is the real board rather than a
+    // contrived one: victoryrule_nohq.js latches the rule per player at map
+    // load, and a side that started HQ-less is never subject to it. Asking
+    // "is there an HQ anywhere" instead ended the game as soon as anything
+    // moved, handing red the win on turn one.
+    const bridgeIsles = readMap(
+      fs.readFileSync(path.join(cwRoot(), 'maps/pre_deployed/8-Bridge Isles.map')));
+    const map = loadIntoGameMap(bridgeIsles, registry);
+    const game = new Game(map, registry, animations);
+
+    const hqOwners = map.players.filter(p => game.ownedBuildings(p)
+      .some(b => b.getBuildingID() === 'HQ'));
+    expect(hqOwners).toHaveLength(1);          // the quirk this guards against
+
+    expect(game.checkGameOver()).toBeNull();
+    expect(map.getPlayer(1)!.isDefeated).toBe(false);
+
+    // And it survives an actual move, which is when the user saw it fire.
+    const mover = map.getPlayer(0)!.units[0];
+    expect(game.select(mover.x, mover.y)).toBeTruthy();
+    game.beginAction('ACTION_WAIT', mover, { x: mover.x, y: mover.y });
+    expect(game.checkGameOver()).toBeNull();
+  });
+
+  it('brings a player under the HQ rule once they capture one', () => {
+    const { map } = newGame();
+    const hq = findBuilding(map, 'HQ', 1)!;
+    const building = map.getTerrain(hq.x, hq.y).getBuilding()!;
+    building.setOwner(null);
+
+    // P2 starts HQ-less, so the rule is dormant...
+    const game = new Game(map, registry, animations);
+    expect(game.checkGameOver()).toBeNull();
+
+    // ...it arms when they take one, and applies when they lose it again.
+    building.setOwner(map.getPlayer(1) ?? null);
+    expect(game.checkGameOver()).toBeNull();
+    building.setOwner(map.getPlayer(0) ?? null);
+    expect(game.checkGameOver()).not.toBeNull();
+    expect(map.getPlayer(1)!.isDefeated).toBe(true);
+  });
+
+  it('counts FORTHQ and FIELD_BASE as headquarters', () => {
+    // BUILDING.hqIds, read from the scripts rather than restated in TypeScript.
+    expect(registry.BUILDING.hqIds).toContain('FORTHQ');
+    expect(registry.BUILDING.hqIds).toContain('FIELD_BASE');
+  });
+
+  it('hands the defeated side\'s buildings to the captor', () => {
+    const { map, game } = newGame();
+    const loser = map.getPlayer(1)!;
+    const held = game.ownedBuildings(loser).length;
+    expect(held).toBeGreaterThan(1);
+
+    for (const owned of game.ownedBuildings(loser)) owned.setOwner(map.getPlayer(0) ?? null);
+    const hq = findBuilding(map, 'HQ', 1);
+    if (hq) map.getTerrain(hq.x, hq.y).getBuilding()!.setOwner(map.getPlayer(0) ?? null);
+
+    game.checkGameOver();
+    expect(game.ownedBuildings(loser)).toHaveLength(0);
+    expect(loser.units).toHaveLength(0);
+  });
+
+  it('keeps allies alive together', () => {
+    // GameRules::checkVictory counts surviving teams, not players: a 2v2 is
+    // not over while one side still has both of its players.
+    const { map, game } = newGame();
+    for (const player of map.players) player.team = 0;
+
+    for (const owned of game.ownedBuildings(map.getPlayer(1)!)) {
+      owned.setOwner(map.getPlayer(0) ?? null);
+    }
+    const hq = findBuilding(map, 'HQ', 1);
+    if (hq) map.getTerrain(hq.x, hq.y).getBuilding()!.setOwner(map.getPlayer(0) ?? null);
+
+    // P2 is still defeated by the rule, but with only one team on the board
+    // from the start there was never an opposing side to beat.
+    game.checkGameOver();
+    expect(map.getPlayer(1)!.isDefeated).toBe(true);
+  });
 });
 
 describe('transport', () => {

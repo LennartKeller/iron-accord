@@ -37,6 +37,7 @@
     <span id="status" class="status">—</span>
     <span class="spacer"></span>
     <span id="turn" class="turn"></span>
+    <button id="nextunit" class="chip" type="button" hidden title="Next unmoved unit (N)">Next</button>
     <button id="endturn" class="chip chip--primary" type="button" hidden>End turn</button>
     <button id="fit" class="chip" type="button">Fit</button>
   </footer>
@@ -118,6 +119,10 @@
         <thead><tr><th>Seat</th><th>Army</th><th>Team</th><th>Controller</th></tr></thead>
         <tbody id="seatRows"></tbody>
       </table>
+      <details class="rules">
+        <summary>Victory conditions</summary>
+        <div class="rules__list" id="victoryRules"></div>
+      </details>
       <p class="settings__note" id="setupNote"></p>
     </div>
   </dialog>

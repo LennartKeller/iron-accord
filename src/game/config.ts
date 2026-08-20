@@ -26,6 +26,12 @@ export interface GameConfig {
    * `unitLimit <= 0`, so this is the engine's own "no cap" value.
    */
   unitLimit: number;
+  /**
+   * Victory rule values by rule id, one entry per input the rule declares.
+   * A rule left out here takes the script's own default, which is how the two
+   * standard conditions — no HQ and no units — end up switched on.
+   */
+  victoryRules: Record<string, number[]>;
   seats: SeatConfig[];
 }
 
@@ -54,6 +60,12 @@ export function sanitizeConfig(config: GameConfig): GameConfig {
       clamp(config.startingFunds, LIMITS.startingFunds.min, LIMITS.startingFunds.max)),
     unitLimit: Math.round(clamp(config.unitLimit, LIMITS.unitLimit.min, LIMITS.unitLimit.max)),
     fundsModifier: clamp(config.fundsModifier, LIMITS.fundsModifier.min, LIMITS.fundsModifier.max),
+    // Per-rule maxima live in the scripts (getMaxValue); all this can say is
+    // that a rule value is a non-negative whole number.
+    victoryRules: Object.fromEntries(
+      Object.entries(config.victoryRules ?? {}).map(([ruleID, values]) => [
+        ruleID, values.map(value => Math.round(clamp(value, 0, Number.MAX_SAFE_INTEGER))),
+      ])),
     seats: config.seats.map((seat, index) => ({
       ...seat,
       // A team outside the seat range would put a player on nobody's side.
@@ -79,6 +91,7 @@ export function defaultConfig(seatCount: number, armies: string[], startingFunds
     startingFunds,
     fundsModifier: 1,
     unitLimit: 0,
+    victoryRules: {},
     seats: Array.from({ length: seatCount }, (_, index) => ({
       army: armies[index] ?? 'OS',
       team: index,

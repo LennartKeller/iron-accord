@@ -31,10 +31,25 @@ export interface ActionOption {
   icon: string;
 }
 
-export type GameOverReason = 'hq-captured' | 'no-units';
+export interface GameOptions {
+  /** Victory rule values by rule id; anything omitted keeps the script default. */
+  victoryRules?: Record<string, number[]>;
+}
+
+export type GameOverReason = 'hq-captured' | 'no-units' | 'rule';
+
+/** Kept for the two conditions the UI and tests name directly. */
+const REASON_BY_RULE: Record<string, GameOverReason> = {
+  VICTORYRULE_NOHQ: 'hq-captured',
+  VICTORYRULE_NOUNITS: 'no-units',
+};
 
 export interface GameOver {
+  /** A surviving player; with teams, one representative of the winning side. */
   winner: number;
+  winningTeam: number;
+  /** The victory rule that ended it, for naming it in the UI. */
+  ruleID: string | null;
   reason: GameOverReason;
 }
 
@@ -43,8 +58,16 @@ export class Game {
   readonly registry: ScriptRegistry;
   readonly animations: AnimationRunner | null;
   currentPlayerIndex = 0;
-  day = 1;
   over: GameOver | null = null;
+
+  /**
+   * The day, read straight off the map. The scripts ask the map for it
+   * (map.getCurrentDay), so keeping a second copy on Game would leave every
+   * day-based victory rule — turn limits, capture and score races — frozen on
+   * day one.
+   */
+  get day(): number { return this.map.currentDay; }
+  set day(value: number) { this.map.currentDay = value; }
 
   /** The unit currently picked up, and where it can go. */
   selected: Unit | null = null;
@@ -52,12 +75,32 @@ export class Game {
   /** Where a picked-up unit is being moved to, before its action is chosen. */
   pendingDestination: { x: number; y: number } | null = null;
 
-  constructor(map: GameMap, registry: ScriptRegistry, animations: AnimationRunner | null = null) {
+  constructor(
+    map: GameMap,
+    registry: ScriptRegistry,
+    animations: AnimationRunner | null = null,
+    options: GameOptions = {},
+  ) {
     this.map = map;
     this.registry = registry;
     this.animations = animations;
+    // A new game starts at the top of day one whatever the map was saved at,
+    // matching the seat reset above. Rules that read the day must see 1.
     this.map.currentPlayerIndex = 0;
+    this.day = 1;
     this.map.vision.update();
+
+    // objects/ruleselection.cpp then GameRules::onGameStart: build every rule
+    // the scripts define — each one seeds its own state from the starting
+    // position — then drop the ones that are switched off.
+    const rules = this.map.getGameRules();
+    rules.attach(this.map, registry);
+    rules.createDefaultVictoryRules();
+    for (const [ruleID, values] of Object.entries(options.victoryRules ?? {})) {
+      values.forEach((value, item) => rules.getVictoryRule(ruleID)?.setRuleValue(value, item));
+    }
+    rules.onGameStart();
+
     this.beginTurn(this.currentPlayer);
   }
 
@@ -586,44 +629,25 @@ export class Game {
   // --- victory ------------------------------------------------------------
 
   /**
-   * Standard Advance Wars conditions: lose your HQ, or lose every unit while
-   * owning no production. Anything more elaborate lives in the victory-rule
-   * scripts and is not wired up yet.
+   * Defeat and victory are decided entirely by gamerules/victory/*.js, through
+   * GameRules::checkVictory. Nothing about who loses when is restated here —
+   * the rules latch state per player, count teams rather than players, and
+   * differ in what happens to a loser's buildings, and every one of those
+   * details lives in the scripts.
    */
   checkGameOver(): GameOver | null {
     if (this.over) return this.over;
+    const outcome = this.map.getGameRules().checkVictory(this.currentPlayer);
+    if (!outcome) return null;
 
-    for (const player of this.map.players) {
-      if (player.isDefeated) continue;
-      const hasHq = this.ownedBuildings(player).some(b => b.getBuildingID() === 'HQ');
-      const hasProduction = this.ownedBuildings(player).some(b => b.canBuildUnits());
-      const hasUnits = player.units.length > 0;
-      const anyHqOnMap = this.anyHqOnMap();
-
-      if ((anyHqOnMap && !hasHq) || (!hasUnits && !hasProduction)) {
-        player.isDefeated = true;
-        for (const unit of [...player.units]) this.map.removeUnit(unit);
-      }
-    }
-
-    const alive = this.map.players.filter(p => !p.isDefeated);
-    if (alive.length === 1 && this.map.players.length > 1) {
-      const loserHadHq = this.anyHqOnMap();
-      this.over = {
-        winner: alive[0].getPlayerID(),
-        reason: loserHadHq ? 'hq-captured' : 'no-units',
-      };
-    }
+    const alive = this.map.players.filter(player => !player.isDefeated);
+    this.over = {
+      winner: alive[0]?.getPlayerID() ?? -1,
+      winningTeam: outcome.team,
+      ruleID: outcome.ruleID,
+      reason: REASON_BY_RULE[outcome.ruleID ?? ''] ?? 'rule',
+    };
     return this.over;
-  }
-
-  private anyHqOnMap(): boolean {
-    for (let y = 0; y < this.map.height; y++) {
-      for (let x = 0; x < this.map.width; x++) {
-        if (this.map.getTerrain(x, y).getBuilding()?.getBuildingID() === 'HQ') return true;
-      }
-    }
-    return false;
   }
 
   ownedBuildings(player: Player): Building[] {

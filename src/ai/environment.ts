@@ -62,7 +62,10 @@ export function defaultReward(before: GameState, after: GameState, player: numbe
   reward -= (enemyValue(after) - enemyValue(before)) * 0.01;
   reward += (properties(after) - properties(before)) * 0.1;
 
-  if (after.over && !before.over) reward += after.over.winner === player ? 1 : -1;
+  if (after.over && !before.over) {
+    // Allies share the result, so the seat's team decides the sign.
+    reward += after.over.winningTeam === after.players[player]?.team ? 1 : -1;
+  }
   return reward;
 }
 

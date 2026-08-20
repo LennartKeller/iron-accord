@@ -62,6 +62,12 @@ export const GameEnums: Record<string, number> = {
   AiTypes_Closed: 199,
   AiTypes_Open: 200,
 
+  // game/GameEnums.h: what happens to a player a victory rule has defeated.
+  DefeatType_Alive: 0,
+  DefeatType_Defeated: 1,          // units destroyed, buildings go neutral
+  DefeatType_ByCurrentPlayer: 2,   // units destroyed, buildings to the captor
+  DefeatType_Domination: 3,        // units and buildings both to the captor
+
   Fog_Off: 0,
   Fog_OfWar: 1,
   Fog_OfShroud: 2,

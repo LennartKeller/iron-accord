@@ -200,3 +200,18 @@ select, .setup input {
 
 .hint { color: var(--muted); font-size: 11px; min-height: 14px; }
 .setup__row label { min-width: 130px; }
+
+/* The pending-unit count is the useful part, so keep it from wrapping. */
+#nextunit { white-space: nowrap; }
+#nextunit[disabled] { opacity: 0.4; }
+
+/* Victory conditions, generated from the rule scripts. */
+.rules { border-top: 1px solid var(--line); padding-top: 10px; }
+.rules summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.rules__list { display: grid; gap: 10px; padding: 8px 2px 2px; }
+.rule { display: grid; gap: 4px; }
+.rule__head { display: flex; align-items: center; gap: 8px; }
+.rule__desc { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.rule__items { display: flex; flex-wrap: wrap; gap: 10px; padding-left: 22px; }
+.rule__items label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.rule__items input[type="number"] { width: 90px; }

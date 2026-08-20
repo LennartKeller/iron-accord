@@ -3,6 +3,9 @@ export { Qt, qsTr, makeGlobals, makeAnimationStubs, Mulberry32 } from './globals
 export type { QPoint, QRect, Rng } from './globals.ts';
 export { QmlVector } from './qmlvector.ts';
 export { GameRules } from './gamerules.ts';
+export type { VictoryOutcome } from './gamerules.ts';
+export { VictoryRule } from './victoryrule.ts';
+export type { RuleInputType } from './victoryrule.ts';
 export { Player } from './player.ts';
 export { Terrain } from './terrain.ts';
 export type { Building, SpriteRequest } from './terrain.ts';

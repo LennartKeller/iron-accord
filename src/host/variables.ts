@@ -14,6 +14,10 @@ export class ScriptVariable {
   writeDataString(next: string): void { this.value = next; }
   readDataBool(): boolean { return Boolean(this.value); }
   writeDataBool(next: boolean): void { this.value = next; }
+  readDataListInt32(): number[] { return Array.isArray(this.value) ? this.value.map(Number) : []; }
+  writeDataListInt32(next: number[]): void { this.value = [...next]; }
+  readDataListString(): string[] { return Array.isArray(this.value) ? this.value.map(String) : []; }
+  writeDataListString(next: string[]): void { this.value = [...next]; }
 }
 
 export class ScriptVariables {
@@ -33,6 +37,7 @@ export class ScriptVariables {
   }
 
   removeVariable(id: string): void { this.variables.delete(id); }
+  deleteVariable(id: string): void { this.variables.delete(id); }
   clear(): void { this.variables.clear(); }
 
   /** For snapshotting. */

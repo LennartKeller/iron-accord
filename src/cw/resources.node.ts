@@ -56,7 +56,8 @@ export function collectScripts(options: CollectOptions = {}): ScriptSource[] {
   // Achievements are bookkeeping, but the action scripts call into them on the
   // human-player branch — without them, building a unit or capturing throws.
   const dirs = options.dirs
-    ?? ['terrain', 'units', 'weapons', 'movementtables', 'building', 'actions', 'achievements'];
+    ?? ['terrain', 'units', 'weapons', 'movementtables', 'building', 'actions', 'achievements',
+        'gamerules/victory'];
   const read = (rel: string): ScriptSource => ({
     path: rel,
     source: fs.readFileSync(path.join(root, rel), 'utf8'),

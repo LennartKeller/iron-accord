@@ -8,6 +8,7 @@ import { bootstrapBrowser } from '../src/game/bootstrap.browser.ts';
 import { gameMapFromScene } from '../src/game/fromscene.ts';
 import { resolveBuildingSprites, resolveUnitSprites } from '../src/maps/loadmap.ts';
 import { Game, type ActionStep } from '../src/game/game.ts';
+import { describeVictoryRules, type VictoryRuleInfo } from '../src/game/victory.ts';
 import { GameEnvironment, HeuristicAgent, applyAction, enumerateActions } from '../src/ai/index.ts';
 import { defaultConfig, sanitizeConfig, LIMITS, type GameConfig, type SeatController } from '../src/game/config.ts';
 import { GameEnums, type AnimationRunner, type Unit } from '../src/host/index.ts';
@@ -28,6 +29,7 @@ const turnEl = $('#turn');
 const menuEl = $('#menu');
 const bannerEl = $('#banner');
 const endTurnButton = $<HTMLButtonElement>('#endturn');
+const nextUnitButton = $<HTMLButtonElement>('#nextunit');
 const picker = $<HTMLDialogElement>('#picker');
 const settingsDialog = $<HTMLDialogElement>('#settingsDialog');
 const setup = $<HTMLDialogElement>('#setup');
@@ -168,12 +170,65 @@ function badgesFor(unit: Unit): { hp?: number; icons: string[] } {
 }
 
 function syncTurn(): void {
-  if (!game) { turnEl.textContent = ''; endTurnButton.hidden = true; return; }
+  if (!game) {
+    turnEl.textContent = '';
+    endTurnButton.hidden = true;
+    nextUnitButton.hidden = true;
+    return;
+  }
   turnEl.textContent = `Day ${game.day} · P${game.currentPlayerIndex + 1} · ${game.currentPlayer.funds}G`;
   turnEl.style.color = playerColor(game.currentPlayerIndex);
   endTurnButton.hidden = false;
   const pending = game.pendingUnits().length;
-  endTurnButton.textContent = pending > 0 ? `End turn (${pending})` : 'End turn';
+  endTurnButton.textContent = 'End turn';
+  nextUnitButton.hidden = false;
+  nextUnitButton.disabled = pending === 0 || aiRunning;
+  nextUnitButton.textContent = pending > 0 ? `Next (${pending})` : 'Next';
+}
+
+/**
+ * Units still awaiting orders, in a stable reading order.
+ *
+ * Row-major rather than spawn order: cycling should feel like sweeping the
+ * board, and unit order otherwise shifts as things are built and destroyed.
+ */
+let lastCycledAt: { x: number; y: number } | null = null;
+
+function pendingInReadingOrder(): Unit[] {
+  if (!game) return [];
+  return game.pendingUnits().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+}
+
+/**
+ * Selects the next unit with orders left, wrapping around, and brings it into
+ * view. Picking one up this way behaves exactly as tapping it does.
+ */
+function cycleToNextUnit(): void {
+  if (!game || aiRunning) return;
+  const pending = pendingInReadingOrder();
+  if (pending.length === 0) return;
+
+  // Resume from where the sweep last stopped, tracked as a board position
+  // rather than a unit: the unit we stopped on has usually taken its orders by
+  // the next press, and looking it up by id would send us back to the top.
+  const from = game.selected ?? lastCycledAt;
+  const next = (from && pending.find(u => u.y > from.y || (u.y === from.y && u.x > from.x)))
+    ?? pending[0];
+  lastCycledAt = { x: next.x, y: next.y };
+
+  resetInteraction();
+  renderer.selected = { x: next.x, y: next.y };
+  if (game.select(next.x, next.y)) {
+    mode = 'moving';
+    actor = game.selected;
+    showRange();
+  }
+
+  // Centre on it: on a large map the next unit is usually off screen.
+  renderer.camera.x = next.x * 16 + 8;
+  renderer.camera.y = next.y * 16 + 8;
+  describe({ x: next.x, y: next.y });
+  requestRender();
 }
 
 function showRange(): void {
@@ -408,6 +463,7 @@ async function maybeRunAI(): Promise<void> {
       const chosen = agent.selectAction(env, legal) ?? { kind: 'endTurn' as const };
 
       if (chosen.kind === 'endTurn') {
+        lastCycledAt = null;
         game.endTurn();
         resetInteraction();
         syncBuildings();
@@ -554,8 +610,18 @@ new PointerControls(canvas, renderer.camera, {
 
 endTurnButton.addEventListener('click', () => {
   if (aiRunning) return;
+  lastCycledAt = null;
   game?.endTurn();
   afterTurnAction();
+});
+
+nextUnitButton.addEventListener('click', cycleToNextUnit);
+
+window.addEventListener('keydown', event => {
+  if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+  // Ignore keys typed into the map search box.
+  if (event.target instanceof HTMLInputElement) return;
+  if (event.key === 'n' || event.key === 'N') { cycleToNextUnit(); event.preventDefault(); }
 });
 
 // --- game over ------------------------------------------------------------
@@ -563,11 +629,18 @@ endTurnButton.addEventListener('click', () => {
 function checkBanner(): void {
   const over = game?.checkGameOver();
   if (!over) return;
-  $('#banner-title').textContent = `Player ${over.winner + 1} wins`;
-  $('#banner-text').textContent = over.reason === 'hq-captured'
-    ? 'Enemy HQ captured.'
-    : 'All enemy forces eliminated.';
+  // A turn limit with no nominated winner defeats everyone, so there may be
+  // no survivor to name.
+  $('#banner-title').textContent = over.winner < 0 ? 'Draw' : `Player ${over.winner + 1} wins`;
+  $('#banner-text').textContent = over.reason === 'hq-captured' ? 'Enemy HQ captured.'
+    : over.reason === 'no-units' ? 'All enemy forces eliminated.'
+    : ruleNameFor(over.ruleID);
   bannerEl.hidden = false;
+}
+/** Names the rule that ended it, using the script's own wording. */
+function ruleNameFor(ruleID: string | null): string {
+  const info = victoryRuleInfos.find(entry => entry.ruleID === ruleID);
+  return info ? `${info.name}.` : 'The game is over.';
 }
 $('#banner-close').addEventListener('click', () => { bannerEl.hidden = true; });
 
@@ -588,7 +661,8 @@ async function loadScene(id: string): Promise<void> {
   if (registry) {
     config ??= defaultConfig(
       scene!.players.length, scene!.players.map(p => p.army), scene!.players[0]?.funds ?? 0);
-    game = new Game(gameMapFromScene(scene!, registry, config), registry, animations);
+    game = new Game(gameMapFromScene(scene!, registry, config), registry, animations,
+      { victoryRules: config.victoryRules });
     env = new GameEnvironment(game.map, registry, { maxFieldChoices: 8 }, game);
   } else {
     game = null;
@@ -736,6 +810,7 @@ async function openSetup(entry: IndexEntry): Promise<void> {
     draft.fog = config.fog;
     draft.startingFunds = config.startingFunds;
     draft.unitLimit = config.unitLimit;
+    draft.victoryRules = { ...config.victoryRules };
   }
 
   ($('#cfgFog') as HTMLSelectElement).value = draft.fog;
@@ -744,11 +819,112 @@ async function openSetup(entry: IndexEntry): Promise<void> {
   ($('#cfgIncome') as HTMLSelectElement).value = String(draft.fundsModifier);
   updateRuleHints();
   renderSeats(draft, scene);
+  renderVictoryRules(draft, scene);
   setupDraft = draft;
   setup.showModal();
 }
 
 let setupDraft: GameConfig | null = null;
+let victoryRuleInfos: VictoryRuleInfo[] = [];
+
+/**
+ * Builds the victory-condition controls from the rule scripts themselves —
+ * names, help text, input kinds, defaults and maxima all come from
+ * gamerules/victory/*.js, so nothing here has to know what a rule does.
+ */
+function renderVictoryRules(draft: GameConfig, scene: Scene): void {
+  const host = $('#victoryRules');
+  host.replaceChildren();
+  if (!registry) return;
+
+  // The rules read the board to work out their defaults — the capture target
+  // scales with the number of properties — so they need a real map.
+  victoryRuleInfos = describeVictoryRules(gameMapFromScene(scene, registry, draft), registry);
+
+  for (const info of victoryRuleInfos) {
+    const values = draft.victoryRules[info.ruleID]
+      ?? info.items.map(item => item.defaultValue);
+
+    const block = document.createElement('div');
+    block.className = 'rule';
+    const head = document.createElement('div');
+    head.className = 'rule__head';
+
+    const [first] = info.items;
+    if (first?.type === 'checkbox') {
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.id = `vr-${info.ruleID}-0`;
+      toggle.checked = values[0] !== 0;
+      head.append(toggle);
+    }
+    const title = document.createElement('strong');
+    title.textContent = info.name;
+    head.append(title);
+
+    if (first?.type === 'spinbox') {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.id = `vr-${info.ruleID}-0`;
+      input.min = '0';
+      input.max = String(first.maxValue);
+      input.value = String(values[0] ?? first.defaultValue);
+      head.append(input);
+    }
+    block.append(head);
+
+    if (info.description) {
+      const note = document.createElement('div');
+      note.className = 'rule__desc';
+      // Rule text carries the engine's own inline markup (<r>, <div c='#0f0'>),
+      // which means nothing to a browser — strip it rather than inject it.
+      note.textContent = info.description.replace(/<[^>]*>/g, '');
+      block.append(note);
+    }
+
+    const extras = info.items.slice(1);
+    if (extras.length > 0) {
+      const row = document.createElement('div');
+      row.className = 'rule__items';
+      extras.forEach((item, offset) => {
+        const index = offset + 1;
+        const label = document.createElement('label');
+        const input = document.createElement('input');
+        input.id = `vr-${info.ruleID}-${index}`;
+        if (item.type === 'checkbox') {
+          input.type = 'checkbox';
+          input.checked = (values[index] ?? item.defaultValue) !== 0;
+        } else {
+          input.type = 'number';
+          input.min = '0';
+          input.max = String(item.maxValue);
+          input.value = String(values[index] ?? item.defaultValue);
+        }
+        // Checkbox reads "[x] Team counter"; a number reads "Unit value [60]".
+        if (item.type === 'checkbox') label.append(input, document.createTextNode(` ${item.name}`));
+        else label.append(document.createTextNode(`${item.name} `), input);
+        row.append(label);
+      });
+      block.append(row);
+    }
+    host.append(block);
+  }
+}
+
+/** Reads the controls back into rule values. */
+function readVictoryRules(): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const info of victoryRuleInfos) {
+    out[info.ruleID] = info.items.map((item, index) => {
+      const input = document.getElementById(`vr-${info.ruleID}-${index}`) as HTMLInputElement | null;
+      if (!input) return item.defaultValue;
+      if (item.type === 'checkbox') return input.checked ? 1 : 0;
+      const value = Math.round(Number(input.value));
+      return Number.isFinite(value) ? Math.min(Math.max(value, 0), item.maxValue) : 0;
+    });
+  }
+  return out;
+}
 
 /** Reads a numeric field, clamping it into range so the form cannot go negative. */
 function readClamped(id: string, bounds: { min: number; max: number }): number {
@@ -849,6 +1025,7 @@ $('#setupStart').addEventListener('click', () => {
   setupDraft.startingFunds = readClamped('#cfgFunds', LIMITS.startingFunds);
   setupDraft.unitLimit = readClamped('#cfgUnitLimit', LIMITS.unitLimit);
   setupDraft.fundsModifier = Number(($('#cfgIncome') as HTMLSelectElement).value) || 1;
+  setupDraft.victoryRules = readVictoryRules();
   // Clamp in the model too: the form is not the only way in.
   config = sanitizeConfig(setupDraft);
   ($('#optFog') as HTMLInputElement).checked = config.fog !== 'off';
@@ -944,6 +1121,17 @@ async function main(): Promise<void> {
     };
     canvas.dispatchEvent(new PointerEvent('pointerdown', shared));
     canvas.dispatchEvent(new PointerEvent('pointerup', shared));
+  }
+
+  // ?press=<id> clicks a control (optionally N times: ?press=nextunit,3), so
+  // button-driven flows can be exercised headlessly too.
+  const press = initial.get('press');
+  if (press) {
+    const [id, times] = press.split(',');
+    const button = document.getElementById(id);
+    for (let i = 0; i < Math.max(1, Math.min(Number(times) || 1, 20)); i++) {
+      (button as HTMLButtonElement | null)?.click();
+    }
   }
 
   // ?ui=maps|setup|settings opens a dialog on load, so any screen can be
