@@ -1,5 +1,5 @@
 import type { Game } from '../game/game.ts';
-import { stoppableTiles } from '../game/pathfinding.ts';
+import { actionableTiles } from '../game/pathfinding.ts';
 
 /**
  * A move, described as plain data.
@@ -75,7 +75,13 @@ export function enumerateActions(game: Game, options: EnumerateOptions = {}): Ac
     const range = game.select(unit.x, unit.y);
     if (!range) continue;
 
-    let destinations = stoppableTiles(range);
+    // actionableTiles, not stoppableTiles: a tile held by a friendly unit
+    // cannot be stopped on but can be acted on, and that is precisely where
+    // loading into a transport and joining a damaged unit happen. Enumerating
+    // only stoppable tiles left the AI unable to board a transport at all —
+    // ACTION_LOAD was never offered once in a whole match on an island map,
+    // so its infantry never left the shore.
+    let destinations = actionableTiles(range);
     const cap = options.maxDestinationsPerUnit;
     if (cap !== undefined && destinations.length > cap) {
       // Keep the cheapest moves; they include staying put.
