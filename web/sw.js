@@ -13,7 +13,18 @@
  * The build's own assets are hashed, so their names are not knowable to a
  * static worker; they are cached on first use instead.
  */
-const VERSION = 'iron-accord-v1';
+/*
+ * The cache name carries a build id, substituted by the pwaAssets plugin from
+ * a hash of the bundle and of data/.
+ *
+ * Data files live at stable URLs and are served cache-first, so nothing else
+ * would ever dislodge them: an installed app would keep serving the scripts
+ * and scenes it first downloaded, however many times the site is redeployed.
+ * Tying the cache name to the build means a deploy that changes them produces
+ * a different worker, which reinstalls and refetches; a deploy that does not
+ * leaves the id alone and costs returning players nothing.
+ */
+const VERSION = 'iron-accord-__BUILD_ID__';
 const SHELL = `${VERSION}-shell`;
 const DATA = `${VERSION}-data`;
 
@@ -79,7 +90,11 @@ self.addEventListener('fetch', event => {
     event.respondWith((async () => {
       try {
         const response = await fetch(request);
-        (await caches.open(SHELL)).put(scoped('.'), response.clone());
+        // Only a real page is worth keeping: caching a 404 or a redirect here
+        // makes every later offline launch serve that error instead.
+        if (response.ok && response.type === 'basic') {
+          (await caches.open(SHELL)).put(scoped('.'), response.clone());
+        }
         return response;
       } catch {
         return (await caches.match(scoped('.'))) ?? Response.error();

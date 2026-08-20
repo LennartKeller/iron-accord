@@ -6,8 +6,17 @@
   <meta name="theme-color" content="#0d1117" />
   <title>Iron Accord</title>
   <link rel="stylesheet" href="./style.css" />
-  <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+  <!--
+    These two are written as base-prefixed absolute paths on purpose. Given a
+    relative href, Vite treats a manifest or icon link as an asset to
+    fingerprint and moves it into assets/. A manifest's start_url, scope and
+    icon paths resolve against wherever the manifest itself ends up, so that
+    silently repoints the installed app at /<base>/assets/ — which 404s.
+    Browsing the site never notices: nothing navigates to start_url until you
+    launch the app from the home screen.
+  -->
+  <link rel="manifest" href="%BASE_URL%manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="%BASE_URL%icons/apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Iron Accord" />
