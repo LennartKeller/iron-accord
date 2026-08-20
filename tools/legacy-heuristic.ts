@@ -1,13 +1,15 @@
-import type { Agent } from './agent.ts';
-import type { GameEnvironment } from './environment.ts';
-import type { ActionDescriptor } from './actions.ts';
-import type { Unit, Player } from '../host/index.ts';
+/**
+ * The heuristic agent exactly as it stood before the navigation and transport
+ * work, kept only so the change can be measured against it. Not shipped.
+ */
+import type { Agent } from '../src/ai/agent.ts';
+import type { GameEnvironment } from '../src/ai/environment.ts';
+import type { ActionDescriptor } from '../src/ai/actions.ts';
+import type { Unit, Player } from '../src/host/index.ts';
 import {
   unitValue, buildingValue, buildThreatMap, captureTargets, canCapture,
   isCapturable, terrainDefence, type ThreatMap,
-} from './evaluate.ts';
-import { Navigator, UNREACHABLE } from './navigation.ts';
-import type { Game } from '../game/game.ts';
+} from '../src/ai/evaluate.ts';
 
 /**
  * A hand-written opponent.
@@ -22,7 +24,7 @@ import type { Game } from '../game/game.ts';
  * UI or in a headless rollout.
  */
 
-export interface HeuristicWeights {
+export interface LegacyWeights {
   /** How much of the counter-attack we expect to eat is charged against a trade. */
   counterWeight: number;
   /** Value of one point of expected incoming damage when choosing where to stand. */
@@ -37,7 +39,7 @@ export interface HeuristicWeights {
   reserveFunds: number;
 }
 
-export const DEFAULT_WEIGHTS: HeuristicWeights = {
+export const LEGACY_WEIGHTS: LegacyWeights = {
   counterWeight: 0.9,
   threatWeight: 0.35,
   advanceWeight: 140,
@@ -51,20 +53,16 @@ interface TurnContext {
   threat: ThreatMap;
   captures: Array<{ x: number; y: number; value: number }>;
   enemyHq: { x: number; y: number } | null;
-  /** Distance to the nearest objective, by movement type, respecting terrain. */
-  navigator: Navigator;
-  /** Tiles a transport can drop a capturer where it can then walk to work. */
-  dropOffs: Navigator;
 }
 
-export class HeuristicAgent implements Agent {
+export class LegacyHeuristicAgent implements Agent {
   readonly name: string;
-  private readonly weights: HeuristicWeights;
+  private readonly weights: LegacyWeights;
   private context: TurnContext | null = null;
   private contextPlayer = -1;
 
-  constructor(weights: Partial<HeuristicWeights> = {}, name = 'heuristic') {
-    this.weights = { ...DEFAULT_WEIGHTS, ...weights };
+  constructor(weights: Partial<LegacyWeights> = {}, name = 'legacy') {
+    this.weights = { ...LEGACY_WEIGHTS, ...weights };
     this.name = name;
   }
 
@@ -92,15 +90,11 @@ export class HeuristicAgent implements Agent {
       }
     }
 
-    const captures = captureTargets(env.game, player);
-    const goals = captures.length > 0 ? captures : (enemyHq ? [enemyHq] : []);
     this.context = {
       self: player,
       threat: buildThreatMap(env.game, player),
-      captures,
+      captures: captureTargets(env.game, player),
       enemyHq,
-      navigator: new Navigator(env.game.map, goals),
-      dropOffs: new Navigator(env.game.map, landingSites(env.game, player, goals)),
     };
     this.contextPlayer = env.currentPlayer;
     return this.context;
@@ -148,8 +142,7 @@ export class HeuristicAgent implements Agent {
       case 'ACTION_FIRE': return this.scoreAttack(env, context, unit, action);
       case 'ACTION_CAPTURE': return this.scoreCapture(env, context, unit, action);
       case 'ACTION_JOIN': return this.scoreJoin(env, unit, action);
-      case 'ACTION_LOAD': return this.scoreLoad(env, context, unit, action);
-      case 'ACTION_UNLOAD': return this.scoreUnload(env, context, unit, action);
+      case 'ACTION_LOAD': return 60;    // getting a foot unit moving is usually good
       case 'ACTION_MISSILE': return this.scoreMissile(env, context, action);
       case 'ACTION_WAIT': return this.scorePosition(env, context, unit, action);
       default: return this.scorePosition(env, context, unit, action) * 0.5;
@@ -202,47 +195,6 @@ export class HeuristicAgent implements Agent {
     return value * progress * this.weights.captureWeight - exposure;
   }
 
-  /**
-   * Boarding a transport.
-   *
-   * Worth a great deal when the unit has no route to anything on its own —
-   * infantry on an island are otherwise dead weight for the whole game — and
-   * worth very little when it can already walk there, since a turn spent
-   * boarding is a turn not spent capturing.
-   */
-  private scoreLoad(
-    env: GameEnvironment, context: TurnContext, unit: Unit, action: ActionDescriptor,
-  ): number {
-    if (action.kind !== 'unit') return 0;
-    const transport = env.game.map.getUnitAt(action.to.x, action.to.y);
-    if (!transport) return 0;
-
-    const stranded = !context.navigator.canReachGoal(unit);
-    // Only useful if the ride is going somewhere the passenger cannot reach.
-    const ferryable = context.dropOffs.canReachGoal(transport);
-    if (!stranded) return canCapture(unit) ? 40 : 20;
-    return ferryable ? 1500 : 0;
-  }
-
-  /**
-   * Putting a passenger ashore. Scored by what it can do once it lands, so a
-   * transport only unloads where the cargo can actually get to work.
-   */
-  private scoreUnload(
-    env: GameEnvironment, context: TurnContext, unit: Unit, action: ActionDescriptor,
-  ): number {
-    if (action.kind !== 'unit' || !action.steps?.length) return 0;
-    const site = action.steps[0];
-    if (typeof site === 'string') return 0;
-
-    const cargo = unit.getLoadedUnit(0);
-    if (!cargo) return 0;
-    const after = context.navigator.distance(cargo, site.x, site.y);
-    if (after === UNREACHABLE) return 0;
-    // Landing next to the objective beats landing across the island from it.
-    return 1200 - after * 20;
-  }
-
   /** Merging two damaged units recovers value only if both are hurt. */
   private scoreJoin(env: GameEnvironment, unit: Unit, action: ActionDescriptor): number {
     if (action.kind !== 'unit') return 0;
@@ -283,19 +235,13 @@ export class HeuristicAgent implements Agent {
     if (action.kind !== 'unit') return 0;
     const { x, y } = action.to;
 
+    const objective = this.objectiveFor(context, unit);
     let score = 10;   // acting beats idling
 
-    // Progress is measured in movement cost to the nearest objective this unit
-    // can actually reach, not in straight-line distance: a town across water is
-    // not two tiles away for infantry, it is unreachable.
-    const carrying = unit.getLoadedUnitCount() > 0;
-    const field = carrying ? context.dropOffs : context.navigator;
-    const before = field.distance(unit, unit.x, unit.y);
-    const after = field.distance(unit, x, y);
-    if (before !== UNREACHABLE && after !== UNREACHABLE) {
+    if (objective) {
+      const before = Math.abs(unit.x - objective.x) + Math.abs(unit.y - objective.y);
+      const after = Math.abs(x - objective.x) + Math.abs(y - objective.y);
       score += (before - after) * this.weights.advanceWeight;
-    } else if (before === UNREACHABLE && after !== UNREACHABLE) {
-      score += this.weights.advanceWeight;          // any way in beats none
     }
 
     // Never park a unit that cannot capture on a building we are trying to
@@ -371,26 +317,4 @@ export class HeuristicAgent implements Agent {
     if (!building) return 0;
     return env.game.buildOptions(building).find(o => o.id === action.unitId)?.cost ?? 0;
   }
-}
-
-/**
- * Where a transport can usefully put a passenger down: land tiles a capturer
- * could walk to an objective from, which is what makes a sea crossing worth
- * making at all.
- */
-function landingSites(
-  game: Game, self: Player, goals: Array<{ x: number; y: number }>,
-): Array<{ x: number; y: number }> {
-  const carrier = self.units.find(unit => unit.getLoadingPlace() > 0);
-  const passenger = carrier?.getLoadedUnit(0) ?? self.units.find(canCapture);
-  if (!passenger || goals.length === 0) return goals;
-
-  const walkable = new Navigator(game.map, goals);
-  const sites: Array<{ x: number; y: number }> = [];
-  for (const goal of goals) {
-    // The goal itself, plus anywhere with a land route to it, is a valid place
-    // to land; the nearest such tile to the water is what the search will find.
-    if (walkable.distance(passenger, goal.x, goal.y) !== UNREACHABLE) sites.push(goal);
-  }
-  return sites.length > 0 ? sites : goals;
 }

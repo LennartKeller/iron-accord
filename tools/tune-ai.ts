@@ -19,33 +19,44 @@ import { DEFAULT_WEIGHTS, type HeuristicWeights } from '../src/ai/heuristic.ts';
 const { registry, animations, rng } = bootstrap();
 
 /**
- * Maps that actually produce a winner, found by tools/survey-maps.ts: of 34
- * two-player boards, 16 resolve inside the day cap and the rest stall out at
- * half a point each, which is wall clock spent on no information.
+ * The benchmark suite, chosen by tools/survey-maps.ts from 144 two-player maps.
  *
- * Split so weights cannot simply be fitted to the boards they were chosen on.
+ * A map earns a place only if it resolves inside the day cap AND both sides own
+ * production, because a suite without factories measures tactics with a fixed
+ * army and nothing else. The first version of this list was drawn entirely from
+ * maps/pre_deployed — where, as the category name says, armies are pre-deployed
+ * — so twelve of its sixteen maps offered no build action at all and both
+ * agents banked six figures of unspendable funds.
+ *
+ * Naval and land maps are listed separately and mixed into both splits, so a
+ * change that only helps on dry land cannot quietly pass.
  */
-export const TRAIN_MAPS = [
+export const NAVAL_MAPS = [
+  'maps/2_player/Burger Isle.map',
   'maps/pre_deployed/8-Bridge Isles.map',
-  'maps/pre_deployed/Crosspaths.map',
-  'maps/pre_deployed/Desert Duel.map',
-  'maps/pre_deployed/Hourglass.map',
-  'maps/pre_deployed/Missile.map',
-  'maps/pre_deployed/Pentagram.map',
-  'maps/pre_deployed/Resistance.map',
-  'maps/pre_deployed/Triangle Lake.map',
-  'maps/pre_deployed/UFO.map',
-  'maps/pre_deployed/Wrench Island.map',
+  'maps/2_player/NORTH STAR.map',
+  'maps/2_player/Snowflake.map',
+  'maps/2_player/Frigid Finale.map',
+  'maps/2_player/Mouse Island.map',
+  'maps/2_player/Fist Peninsula.map',
+  'maps/2_player/MELON LAND.map',
 ];
 
-export const VALIDATION_MAPS = [
-  'maps/pre_deployed/Bundle City.map',
-  'maps/pre_deployed/Chessboard.map',
-  'maps/pre_deployed/Liaison Wood.map',
-  'maps/pre_deployed/Mint Plateau.map',
-  'maps/pre_deployed/Narrow Ridge.map',
-  'maps/pre_deployed/Trifecta Isles.map',
+export const LAND_MAPS = [
+  'maps/2_player/Feline Basin.map',
+  'maps/2_player/Plug Mountain.map',
+  'maps/2_player/Basin Forest.map',
+  'maps/2_player/Dual River.map',
+  'maps/2_player/Precipitation.map',
+  'maps/2_player/Metro Map.map',
+  'maps/2_player/SABRE RANGE.map',
+  'maps/2_player/Center River.map',
+  'maps/2_player/Spectacle Map.map',
+  'maps/2_player/Marengo.map',
 ];
+
+export const TRAIN_MAPS = [...NAVAL_MAPS.slice(0, 5), ...LAND_MAPS.slice(0, 7)];
+export const VALIDATION_MAPS = [...NAVAL_MAPS.slice(5), ...LAND_MAPS.slice(7)];
 
 export const MAPS = TRAIN_MAPS;
 
