@@ -15,3 +15,6 @@ export { Belief } from './belief.ts';
 export type { KnownUnit } from './belief.ts';
 export { evaluatePosition, DEFAULT_POSITION_WEIGHTS } from './position.ts';
 export type { PositionWeights } from './position.ts';
+export { HeuristicEvaluator } from './evaluator.ts';
+export type { Evaluator } from './evaluator.ts';
+export { vocabulary } from '../scripts/vocabulary.ts';

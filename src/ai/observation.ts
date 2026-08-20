@@ -1,4 +1,5 @@
 import type { Game } from '../game/game.ts';
+import { vocabulary } from '../scripts/vocabulary.ts';
 import { GameEnums, MAX_UNIT_HP } from '../host/index.ts';
 
 /**
@@ -74,8 +75,22 @@ export class ObservationEncoder {
     };
   }
 
-  /** Convenience: derive the channel vocabulary from a live game. */
-  static fromGame(game: Game, unitVocabulary: string[]): ObservationEncoder {
+  /**
+   * An encoder for this board, with channels drawn from the whole script
+   * registry rather than from the ids this map happens to contain.
+   *
+   * Per-map vocabularies gave a different channel count on every board — 38 on
+   * one, more on another — which no single network can consume. The board size
+   * still varies, which is why the net must be fully convolutional, but the
+   * channel layout is now identical everywhere.
+   */
+  static fromGame(game: Game, _unitVocabulary?: string[]): ObservationEncoder {
+    const { terrain, units, buildings } = vocabulary(game.map.registry);
+    return new ObservationEncoder(game.map.width, game.map.height, terrain, units, buildings);
+  }
+
+  /** The per-map vocabulary, kept for tests that want a compact tensor. */
+  static forMapOnly(game: Game, unitVocabulary: string[]): ObservationEncoder {
     const terrainIds = new Set<string>();
     const buildingIds = new Set<string>();
     for (let y = 0; y < game.map.height; y++) {

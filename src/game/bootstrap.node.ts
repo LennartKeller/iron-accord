@@ -1,6 +1,7 @@
 import { NodeEvaluator } from '../scripts/evaluator-node.ts';
 import { loadScripts, type LoadReport } from '../scripts/loader.ts';
 import type { ScriptRegistry } from '../scripts/types.ts';
+export { vocabulary } from '../scripts/vocabulary.ts';
 import { collectScripts, type CollectOptions } from '../cw/resources.node.ts';
 import {
   GameEnums, Qt, qsTr, makeGlobals, makeAnimationStubs, Mulberry32, GameMap, AnimationRunner,

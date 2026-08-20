@@ -1,7 +1,7 @@
 import { HeuristicAgent } from './heuristic.ts';
 import { Belief } from './belief.ts';
-import { buildBeliefThreatMap } from './evaluate.ts';
-import { evaluatePosition, DEFAULT_POSITION_WEIGHTS, type PositionWeights } from './position.ts';
+import { HeuristicEvaluator, type Evaluator } from './evaluator.ts';
+import { DEFAULT_POSITION_WEIGHTS, type PositionWeights } from './position.ts';
 import { enumerateActions, applyAction, actionKey, type ActionDescriptor } from './actions.ts';
 import type { Agent } from './agent.ts';
 import type { GameEnvironment } from './environment.ts';
@@ -17,6 +17,8 @@ export interface PlannerOptions {
   /** Wall-clock budget per turn, in milliseconds. */
   timeBudgetMs: number;
   position: PositionWeights;
+  /** How positions are scored. Swap in a network without touching the search. */
+  evaluator?: Evaluator<unknown>;
 }
 
 export const DEFAULT_PLANNER_OPTIONS: PlannerOptions = {
@@ -51,6 +53,7 @@ interface Plan {
 export class PlannerAgent implements Agent {
   readonly name: string;
   private readonly options: PlannerOptions;
+  private readonly evaluator: Evaluator<unknown>;
   /** Move ordering. The greedy agent is a good, cheap policy for that job. */
   private readonly ordering = new HeuristicAgent();
   private belief: Belief | null = null;
@@ -60,6 +63,7 @@ export class PlannerAgent implements Agent {
 
   constructor(options: Partial<PlannerOptions> = {}, name = 'planner') {
     this.options = { ...DEFAULT_PLANNER_OPTIONS, ...options };
+    this.evaluator = this.options.evaluator ?? new HeuristicEvaluator(this.options.position);
     this.name = name;
   }
 
@@ -79,7 +83,7 @@ export class PlannerAgent implements Agent {
     return this.belief;
   }
 
-  selectAction(env: GameEnvironment, legal: ActionDescriptor[]): ActionDescriptor | null {
+  async selectAction(env: GameEnvironment, legal: ActionDescriptor[]): Promise<ActionDescriptor | null> {
     if (legal.length === 0) return null;
     const turnId = env.game.day * 100 + env.currentPlayer;
 
@@ -92,7 +96,7 @@ export class PlannerAgent implements Agent {
       // agent permanently surprised. beliefFor only starts over if the seat
       // changes, which one instance per seat never does.
       this.beliefFor(env.game.currentPlayer).observe(env.game);
-      this.queue = this.plan(env, legal);
+      this.queue = await this.plan(env, legal);
       this.queueTurn = turnId;
     }
 
@@ -112,17 +116,28 @@ export class PlannerAgent implements Agent {
     return this.ordering.selectAction(env, legal);
   }
 
-  /** Beam search over the rest of the turn. */
-  private plan(env: GameEnvironment, legal: ActionDescriptor[]): ActionDescriptor[] {
+  /**
+   * Beam search over the rest of the turn.
+   *
+   * Each layer is expanded in full, capturing what the evaluator needs from
+   * every child while its position still exists, and only then scored — one
+   * batched call per layer rather than one per child.
+   */
+  private async plan(env: GameEnvironment, legal: ActionDescriptor[]): Promise<ActionDescriptor[]> {
     const deadline = Date.now() + this.options.timeBudgetMs;
     const self = env.game.currentPlayer;
+    const seat = self.getPlayerID();
     const belief = this.beliefFor(self);
 
     let beam: Plan[] = [{ actions: [], score: -Infinity }];
-    let best: Plan = { actions: [], score: this.evaluate(env, self, belief) };
+    let best: Plan = { actions: [], score: -Infinity };
+
+    // The position as it stands, so a turn that does nothing has a price.
+    const opening = this.evaluator.capture(env.game, self, belief);
+    best.score = (await this.evaluator.score([opening]))[0];
 
     for (let depth = 0; depth < this.options.maxPlanLength; depth++) {
-      const next: Plan[] = [];
+      const pending: Array<{ actions: ActionDescriptor[]; capture: unknown }> = [];
 
       for (const plan of beam) {
         if (Date.now() > deadline) break;
@@ -136,16 +151,21 @@ export class PlannerAgent implements Agent {
           for (const candidate of this.topActions(env, options)) {
             env.explore(() => {
               if (!applyAction(env.game, candidate)) return;
-              next.push({
+              const player = env.game.map.getPlayer(seat);
+              if (!player) return;
+              pending.push({
                 actions: [...plan.actions, candidate],
-                score: this.evaluate(env, env.game.map.getPlayer(self.getPlayerID())!, belief),
+                capture: this.evaluator.capture(env.game, player, belief),
               });
             });
           }
         });
       }
 
-      if (next.length === 0) break;
+      if (pending.length === 0) break;
+      const scores = await this.evaluator.score(pending.map(entry => entry.capture));
+      const next: Plan[] = pending.map((entry, i) => ({ actions: entry.actions, score: scores[i] }));
+
       next.sort((a, b) => b.score - a.score);
       if (next[0].score > best.score) best = next[0];
       beam = next.slice(0, this.options.beamWidth);
@@ -162,10 +182,5 @@ export class PlannerAgent implements Agent {
       .map(action => ({ action, score: this.ordering.scoreFor(env, action) }));
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, this.options.branching).map(entry => entry.action);
-  }
-
-  private evaluate(env: GameEnvironment, self: Player, belief: Belief): number {
-    const threat = buildBeliefThreatMap(env.game, self, belief);
-    return evaluatePosition(env.game, self, belief, threat, this.options.position);
   }
 }

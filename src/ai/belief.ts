@@ -38,7 +38,11 @@ export class Belief {
   private explored: Uint8Array | null = null;
   private lastDay = 0;
 
-  constructor(private readonly player: Player) {}
+  private readonly player: Player;
+
+  constructor(player: Player) {
+    this.player = player;
+  }
 
   private get fogged(): boolean {
     return this.player.map.getGameRules().getFogMode() !== GameEnums.Fog_Off;

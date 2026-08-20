@@ -68,10 +68,16 @@ export function fieldAt(map: GameMap, field: Float64Array, x: number, y: number)
 export class Navigator {
   private readonly fields = new Map<string, Float64Array>();
 
-  constructor(
-    private readonly map: GameMap,
-    private readonly goals: Array<{ x: number; y: number }>,
-  ) {}
+  // Written out rather than declared as parameter properties: these files are
+  // loaded by plain `node` in the self-play workers, whose type stripping
+  // erases annotations but cannot generate the assignments they imply.
+  private readonly map: GameMap;
+  private readonly goals: Array<{ x: number; y: number }>;
+
+  constructor(map: GameMap, goals: Array<{ x: number; y: number }>) {
+    this.map = map;
+    this.goals = goals;
+  }
 
   /** Distance-to-goal field for whatever moves like this unit. */
   for(unit: Unit): Float64Array {
