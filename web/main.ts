@@ -32,9 +32,17 @@ const picker = $<HTMLDialogElement>('#picker');
 const settingsDialog = $<HTMLDialogElement>('#settingsDialog');
 const setup = $<HTMLDialogElement>('#setup');
 
+/**
+ * Everything is fetched relative to the deployment root. GitHub Pages serves a
+ * project site from a subpath, so absolute "/sprites/..." URLs would 404 there
+ * while working perfectly in local development.
+ */
+const BASE = import.meta.env.BASE_URL;
+const asset = (relativePath: string) => `${BASE}${relativePath}`.replace(/([^:])\/{2,}/g, '$1/');
+
 const sprites = new SpriteStore(
-  id => `/sprites/${assetFileName(id)}.png`,
-  name => `/colortables/${assetFileName(name)}.png`,
+  id => asset(`sprites/${assetFileName(id)}.png`),
+  name => asset(`colortables/${assetFileName(name)}.png`),
 );
 const renderer = new SceneRenderer(canvas, sprites);
 // Repaint once a sprite we needed mid-frame has decoded.
@@ -558,7 +566,7 @@ async function loadScene(id: string): Promise<void> {
   url.searchParams.set('map', id);
   history.replaceState(null, '', url);
 
-  scene = await (await fetch(`/scenes/${id}.json`)).json();
+  scene = await (await fetch(asset(`scenes/${id}.json`))).json();
   await renderer.load(scene!);
   bannerEl.hidden = true;
   resetInteraction();
@@ -697,7 +705,7 @@ let pendingScene: Scene | null = null;
 /** Picking a map opens setup rather than starting immediately. */
 async function openSetup(entry: IndexEntry): Promise<void> {
   pendingMap = entry;
-  pendingScene = await (await fetch(`/scenes/${entry.id}.json`)).json();
+  pendingScene = await (await fetch(asset(`scenes/${entry.id}.json`))).json();
   const scene = pendingScene!;
 
   $('#setupTitle').textContent = scene.name;
@@ -868,8 +876,8 @@ async function main(): Promise<void> {
   // ?ai=2 makes seat 2 computer-controlled; ?ai=all makes every seat AI.
   const aiSeats = initial.get('ai');
   if (startFogged) ($('#optFog') as HTMLInputElement).checked = true;
-  sprites.setManifest(await (await fetch('/sprites/index.json')).json());
-  index = await (await fetch('/scenes/index.json')).json();
+  sprites.setManifest(await (await fetch(asset('sprites/index.json'))).json());
+  index = await (await fetch(asset('scenes/index.json'))).json();
   const categories = [...new Set(index.map(e => e.category))].sort();
   $<HTMLSelectElement>('#filterCategory').append(...categories.map(category => {
     const option = document.createElement('option');
@@ -880,7 +888,7 @@ async function main(): Promise<void> {
   renderList();
 
   try {
-    const boot = await bootstrapBrowser();
+    const boot = await bootstrapBrowser(asset('scripts.json'));
     registry = boot.registry;
     animations = boot.animations;
     if (boot.report.failed.length) console.warn('scripts failed to load', boot.report.failed);
@@ -895,7 +903,7 @@ async function main(): Promise<void> {
     ?? index[0];
   if (startup) {
     currentMapId = startup.id;
-    const scene: Scene = await (await fetch(`/scenes/${startup.id}.json`)).json();
+    const scene: Scene = await (await fetch(asset(`scenes/${startup.id}.json`))).json();
     config = defaultConfig(
       scene.players.length, scene.players.map(p => p.army), scene.players[0]?.funds ?? 0);
     if (startFogged) config.fog = 'war';
@@ -919,3 +927,13 @@ async function main(): Promise<void> {
 }
 
 void main();
+
+// Register the worker after boot so it never delays first paint. Dev builds
+// skip it: a cache-first worker in front of HMR is nothing but confusing.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(asset('sw.js'), { scope: BASE }).catch(error => {
+      console.warn('service worker registration failed', error);
+    });
+  });
+}

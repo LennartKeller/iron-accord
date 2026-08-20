@@ -314,6 +314,11 @@ const scriptsFile = path.join(outRoot, 'scripts.json');
 fs.writeFileSync(scriptsFile, JSON.stringify(scriptBundle));
 const scriptBytes = fs.statSync(scriptsFile).size;
 
+fs.writeFileSync(
+  path.join(tablesDir, 'index.json'),
+  JSON.stringify(fs.readdirSync(tablesDir).filter(f => f.endsWith('.png')).map(f => f.replace(/\.png$/, ''))),
+);
+
 const sceneBytes = fs.readdirSync(scenesDir).reduce((n, f) => n + fs.statSync(path.join(scenesDir, f)).size, 0);
 const mb = (n: number) => `${(n / 1024 / 1024).toFixed(2)} MB`;
 console.log(`scenes      : ${index.length}/${files.length}  ${mb(sceneBytes)}`);
