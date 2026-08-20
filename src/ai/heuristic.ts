@@ -117,6 +117,16 @@ export class HeuristicAgent implements Agent {
     return best ?? { kind: 'endTurn' };
   }
 
+  /**
+   * The greedy score for one action, with the turn view built on demand.
+   * Exposed so a search agent can borrow this as its move-ordering policy —
+   * a cheap, decent ranking is exactly what a beam needs to decide what to
+   * expand first.
+   */
+  scoreFor(env: GameEnvironment, action: ActionDescriptor): number {
+    return this.score(env, this.ensureContext(env), action);
+  }
+
   private score(env: GameEnvironment, context: TurnContext, action: ActionDescriptor): number {
     if (action.kind === 'build') return this.scoreBuild(env, context, action);
     if (action.kind !== 'unit') return 0;

@@ -617,6 +617,25 @@ export class Unit {
     this.loaded.push(unit);
   }
 
+  /**
+   * game/unit.cpp: Unit::spawnUnit — creates a unit directly into this one's
+   * hold, without a factory and without paying for it.
+   *
+   * This is how a carrier builds its own aircraft (ACTION_BUILD_WATERPLANE).
+   * The unit limit still applies; unlike loadUnit there is nothing to remove
+   * from the board first, because the unit has never been on it.
+   */
+  spawnUnit(unitID: string): Unit | null {
+    const limit = this.map.getGameRules().getUnitLimit();
+    if (limit > 0 && this.owner.getUnitCount() >= limit) return null;
+    if (this.loaded.length >= this.getLoadingPlace()) return null;
+    // The constructor runs the unit script's init, and cargo deliberately does
+    // not join the owner's roster — the same end state loadUnit leaves.
+    const unit = new Unit(this.map, unitID, this.owner, this.x, this.y);
+    this.loaded.push(unit);
+    return unit;
+  }
+
   /** Puts a carried unit back on the board at `position`. */
   unloadUnit(unit: Unit, position?: QPoint): void {
     const index = this.loaded.indexOf(unit);

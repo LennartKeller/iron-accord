@@ -2,6 +2,7 @@ import type { Game } from '../game/game.ts';
 import type { Unit, Player, Building } from '../host/index.ts';
 import { computeMovementRange } from '../game/pathfinding.ts';
 import { threatenedTiles } from '../game/threat.ts';
+import type { Belief } from './belief.ts';
 
 /**
  * Scoring primitives the heuristic agent reasons with.
@@ -79,6 +80,55 @@ export function buildThreatMap(game: Game, self: Player): ThreatMap {
     at: (x, y) => (map.onMap(x, y) ? Math.min(threat[y * map.width + x], 1.5) : 0),
   };
 }
+
+/**
+ * Where the enemy can hit next turn, using only what this player knows.
+ *
+ * Units in view are priced exactly, through the same reach calculation the UI
+ * draws. Remembered ones are an estimate: we know what type it was and roughly
+ * where, so the reach is approximated as a diamond that widens by one tile per
+ * day since the sighting — a tank last seen three days ago could be anywhere
+ * within three moves of there — and its contribution decays with age, because
+ * acting on a week-old sighting as if it were fact is its own mistake.
+ *
+ * With fog off every unit is "seen" and this reduces to the exact map.
+ */
+export function buildBeliefThreatMap(game: Game, self: Player, belief: Belief): ThreatMap {
+  const { map } = game;
+  const threat = new Float64Array(map.width * map.height);
+
+  for (const known of belief.known()) {
+    // The live unit supplies its type's statistics — how far it moves, how far
+    // it shoots. Its current position is NOT read: that is the secret.
+    const unit = map.getUnitByUid(known.uid);
+    if (!unit) continue;
+    const contribution = TYPICAL_HIT * (known.hp / 10) * Math.pow(STALENESS_DECAY, known.age);
+    if (contribution <= 0.01) continue;
+
+    if (known.seen) {
+      for (const tile of threatenedTiles(map, unit)) {
+        threat[tile.y * map.width + tile.x] += contribution;
+      }
+      continue;
+    }
+
+    const reach = unit.getMovementpoints() + unit.getMaxRange() + known.age;
+    for (let dy = -reach; dy <= reach; dy++) {
+      for (let dx = -reach; dx <= reach; dx++) {
+        if (Math.abs(dx) + Math.abs(dy) > reach) continue;
+        const x = known.x + dx;
+        const y = known.y + dy;
+        if (!map.onMap(x, y)) continue;
+        threat[y * map.width + x] += contribution;
+      }
+    }
+  }
+
+  return { at: (x, y) => (map.onMap(x, y) ? Math.min(threat[y * map.width + x], 1.5) : 0) };
+}
+
+/** How much a sighting is discounted per day since it was made. */
+const STALENESS_DECAY = 0.7;
 
 /** Manhattan distance to the nearest tile matching a predicate, or Infinity. */
 export function distanceToNearest(

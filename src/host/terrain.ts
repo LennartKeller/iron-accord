@@ -244,6 +244,24 @@ export class Terrain {
   setHasStartOfTurn(_value: boolean): void {}
   setTerrainPalette(palette: string): void { this.palette = palette; }
   unloadSprites(): void { this.sprites.length = 0; }
+
+  /**
+   * game/terrain.cpp: Terrain::loadSprites — discards what was recorded and
+   * asks the terrain script to describe the tile again.
+   *
+   * Scripts call this when a tile changes appearance where it stands rather
+   * than being replaced: METEOR.onDestroyed repaints the plasma it leaves
+   * behind and the meteors around it. Without it that script throws part-way
+   * and the remaining tiles keep their old sprites.
+   */
+  loadSprites(reloadBase = true): void {
+    this.unloadSprites();
+    if (reloadBase) this.baseTerrain?.loadSprites(true);
+    const script = this.map.registry[this.terrainID];
+    if (!script) return;
+    script.loadBaseSprite?.(this, this.map);
+    script.loadOverlaySprite?.(this, this.map);
+  }
   loadBaseTerrainSprites(): void {}
   loadBaseTerrain(terrainID: string): void {
     const base = new Terrain(this.map, this.x, this.y, terrainID);

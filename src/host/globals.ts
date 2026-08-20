@@ -7,6 +7,16 @@ export interface Rng {
   next(): number;
   /** Restarts the stream. Episodes must be able to reproduce exactly. */
   reseed(seed: number): void;
+  /**
+   * Position in the stream, so a caller can rewind it.
+   *
+   * A search agent simulates attacks to decide what to play, and every
+   * simulated attack rolls luck. Without rewinding, merely *thinking* about a
+   * line would consume the randomness the real game was going to use, so the
+   * board would evolve differently depending on how hard the AI thought.
+   */
+  getState(): number;
+  setState(state: number): void;
 }
 
 /** Deterministic PRNG so replays and tests reproduce exactly. */
@@ -18,6 +28,8 @@ export class Mulberry32 implements Rng {
     this.state = this.initialSeed;
   }
   reseed(seed: number = this.initialSeed): void { this.state = seed >>> 0; }
+  getState(): number { return this.state; }
+  setState(state: number): void { this.state = state >>> 0; }
   next(): number {
     this.state = (this.state + 0x6d2b79f5) >>> 0;
     let t = this.state;

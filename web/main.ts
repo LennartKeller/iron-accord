@@ -10,7 +10,10 @@ import { resolveBuildingSprites, resolveUnitSprites } from '../src/maps/loadmap.
 import { Game, type ActionStep } from '../src/game/game.ts';
 import { describeVictoryRules, type VictoryRuleInfo } from '../src/game/victory.ts';
 import { threatenedTiles } from '../src/game/threat.ts';
-import { GameEnvironment, HeuristicAgent, applyAction, enumerateActions } from '../src/ai/index.ts';
+import {
+  GameEnvironment, HeuristicAgent, PlannerAgent, applyAction, enumerateActions,
+  type Agent,
+} from '../src/ai/index.ts';
 import { defaultConfig, sanitizeConfig, LIMITS, type GameConfig, type SeatController } from '../src/game/config.ts';
 import { GameEnums, type AnimationRunner, type Unit } from '../src/host/index.ts';
 import type { ScriptRegistry } from '../src/scripts/types.ts';
@@ -56,7 +59,29 @@ let animations: AnimationRunner | null = null;
 let game: Game | null = null;
 let scene: Scene | null = null;
 let env: GameEnvironment | null = null;
-const agent = new HeuristicAgent();
+/**
+ * The opponents on offer. The planner searches whole turns and reasons from
+ * what its side can actually see, so it is the one to play under fog; the
+ * heuristic is faster and remains the default.
+ */
+const AGENTS: Record<string, () => Agent> = {
+  heuristic: () => new HeuristicAgent(),
+  // A visible turn should not stall on a phone, so the search is kept short.
+  planner: () => new PlannerAgent({ timeBudgetMs: 250 }),
+};
+
+const agents = new Map<number, Agent>();
+
+/** The agent for a seat, built once and kept so its memory survives the turn. */
+function agentFor(seat: number): Agent {
+  const wanted = config?.seats[seat]?.agent ?? 'heuristic';
+  let existing = agents.get(seat);
+  if (!existing || existing.name !== wanted) {
+    existing = (AGENTS[wanted] ?? AGENTS.heuristic)();
+    agents.set(seat, existing);
+  }
+  return existing;
+}
 /** Set while the AI is playing, so taps do not fight it for control. */
 let aiRunning = false;
 let aiCancelled = false;
@@ -487,9 +512,15 @@ async function maybeRunAI(): Promise<void> {
 
   try {
     let guard = 0;
+    let acting = -1;
     while (!aiCancelled && game && !game.over && currentSeatIsAI() && guard++ < 500) {
       const legal = enumerateActions(game, { maxFieldChoices: 8 });
-      const chosen = agent.selectAction(env, legal) ?? { kind: 'endTurn' as const };
+      const seat = agentFor(game.currentPlayerIndex);
+      if (acting !== game.currentPlayerIndex) {
+        acting = game.currentPlayerIndex;
+        await seat.beginTurn?.(env);
+      }
+      const chosen = await seat.selectAction(env, legal) ?? { kind: 'endTurn' as const };
 
       if (chosen.kind === 'endTurn') {
         lastCycledAt = null;
@@ -1034,9 +1065,16 @@ function renderSeats(draft: GameConfig, scene: Scene): void {
     const teams = draft.seats.map((_, i) => String(i + 1));
     teamCell.append(select(teams, String(seat.team + 1), value => { seat.team = Number(value) - 1; }));
 
+    // Controller and opponent share a cell: the opponent picker is meaningless
+    // for a human seat, so it appears only when one is needed.
     const controlCell = document.createElement('td');
-    controlCell.append(select(['human', 'ai'], seat.controller,
-      value => { seat.controller = value as SeatController; }));
+    const opponent = select(Object.keys(AGENTS), seat.agent ?? 'heuristic',
+      value => { seat.agent = value; });
+    opponent.hidden = seat.controller !== 'ai';
+    controlCell.append(select(['human', 'ai'], seat.controller, value => {
+      seat.controller = value as SeatController;
+      opponent.hidden = seat.controller !== 'ai';
+    }), opponent);
 
     row.append(seatCell, armyCell, teamCell, controlCell);
     return row;
@@ -1096,7 +1134,6 @@ $('#setupStart').addEventListener('click', () => {
   setupDraft.victoryRules = readVictoryRules();
   // Clamp in the model too: the form is not the only way in.
   config = sanitizeConfig(setupDraft);
-  ($('#optFog') as HTMLInputElement).checked = config.fog !== 'off';
   currentMapId = pendingMap.id;
   setup.close();
   void loadScene(pendingMap.id);
@@ -1119,21 +1156,14 @@ $<HTMLInputElement>('#optDim').addEventListener('change', e => {
   syncUnits();
   requestRender();
 });
-$<HTMLInputElement>('#optFog').addEventListener('change', e => {
-  if (!config) return;
-  config.fog = (e.target as HTMLInputElement).checked ? 'war' : 'off';
-  // Vision changes the whole board state, so the map restarts.
-  if (currentMapId) void loadScene(currentMapId);
-});
-
 window.addEventListener('resize', () => { renderer.resize(); requestRender(); });
 
 async function main(): Promise<void> {
   const initial = new URL(location.href).searchParams;
+  // ?fog=1 starts a fogged game, for headless checks of the vision path.
   const startFogged = initial.get('fog') === '1';
   // ?ai=2 makes seat 2 computer-controlled; ?ai=all makes every seat AI.
   const aiSeats = initial.get('ai');
-  if (startFogged) ($('#optFog') as HTMLInputElement).checked = true;
   sprites.setManifest(await (await fetch(asset('sprites/index.json'))).json());
   index = await (await fetch(asset('scenes/index.json'))).json();
   const categories = [...new Set(index.map(e => e.category))].sort();

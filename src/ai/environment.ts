@@ -144,9 +144,21 @@ export class GameEnvironment {
   snapshot(): GameState { return snapshot(this.game); }
   restore(state: GameState): void { restore(this.game, state); }
 
-  /** Explores a line of play and rewinds. */
+  /**
+   * Explores a line of play and rewinds, the randomness included.
+   *
+   * The script RNG is process-wide, so a simulated battle advances the same
+   * stream the real game draws from. Restoring the board without restoring the
+   * stream would let the AI's deliberation change the dice.
+   */
   explore<T>(fn: () => T): T {
     const saved = this.snapshot();
-    try { return fn(); } finally { this.restore(saved); }
+    const rngState = this.options.rng?.getState();
+    try {
+      return fn();
+    } finally {
+      this.restore(saved);
+      if (rngState !== undefined) this.options.rng?.setState(rngState);
+    }
   }
 }
