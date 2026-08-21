@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import readline from 'node:readline';
 import { readMap } from '../src/maps/mapreader.ts';
 import { loadIntoGameMap } from '../src/maps/loadmap.ts';
 import { bootstrap } from '../src/game/bootstrap.node.ts';
@@ -39,9 +40,30 @@ function fingerprint(game: Game): string {
   return `${game.day}/${game.currentPlayerIndex}/${funds}/${units}/${buildings.join('|')}`;
 }
 
-const raw = fs.readFileSync(file);
-const text = file.endsWith('.gz') ? zlib.gunzipSync(raw).toString('utf8') : raw.toString('utf8');
-const lines = text.trim().split('\n').slice(0, limit);
+/**
+ * The first `count` replays, read as a stream.
+ *
+ * Decompressing the whole file into one string worked until the run got big: at
+ * 50k games it lands past Node's ~512 MB cap on a string and throws. Nothing
+ * here ever needed the whole file — only the first few hundred lines — so it
+ * reads until it has them and stops.
+ */
+async function head(file: string, count: number): Promise<string[]> {
+  const stream = file.endsWith('.gz')
+    ? fs.createReadStream(file).pipe(zlib.createGunzip())
+    : fs.createReadStream(file);
+  const lines: string[] = [];
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (line.trim()) lines.push(line);
+    if (lines.length >= count) break;
+  }
+  rl.close();
+  stream.destroy();
+  return lines;
+}
+
+const lines = await head(file, limit);
 let matched = 0, mismatched = 0, rejected = 0;
 
 for (const line of lines) {

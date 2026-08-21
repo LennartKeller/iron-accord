@@ -21,6 +21,30 @@ import torch
 from train_value import ValueNet
 
 
+class ExportWrapper(torch.nn.Module):
+    """
+    Graph outputs, held steady across the training head.
+
+    `value` is always the scalar the planner ranks on, so `onnx-evaluator.ts`
+    reads one output name whichever head produced the file. A wdl model exports
+    the distribution beside it under `wdl`: the probability of a draw is real
+    information about a position, and collapsing to a scalar throws it away --
+    cheap to carry here, impossible to recover downstream.
+    """
+
+    def __init__(self, model, head):
+        super().__init__()
+        self.model = model
+        self.head = head
+
+    def forward(self, planes, scalars):
+        out = self.model(planes, scalars)
+        if self.head != 'wdl':
+            return out
+        p = torch.softmax(out, dim=1)
+        return p[:, 2] - p[:, 0], p
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--checkpoint', default='models/value.pt')
@@ -32,24 +56,34 @@ def main():
     spec = ckpt['manifest']
     trained = ckpt['args']
 
+    # Checkpoints written before the wdl head exist and have no 'head' key.
+    head = trained.get('head', 'scalar')
     model = ValueNet(spec, trained['width'], trained['blocks'], trained['input'],
-                     scalars=len(spec['scalarNames']), norm=trained.get('norm', 'group'))
+                     scalars=len(spec['scalarNames']), norm=trained.get('norm', 'group'),
+                     head=head)
     model.load_state_dict(ckpt['model'])
     model.eval()
+    wrapper = ExportWrapper(model, head).eval()
 
     planes = 3 + spec['derivedCount']
     dummy_planes = torch.zeros(2, planes, 9, 11, dtype=torch.uint8)
     dummy_scalars = torch.zeros(2, len(spec['scalarNames']), dtype=torch.float32)
 
+    dynamic_axes = {
+        'planes': {0: 'batch', 2: 'height', 3: 'width'},
+        'scalars': {0: 'batch'},
+        'value': {0: 'batch'},
+    }
+    output_names = ['value']
+    if head == 'wdl':
+        output_names.append('wdl')
+        dynamic_axes['wdl'] = {0: 'batch'}
+
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
     torch.onnx.export(
-        model, (dummy_planes, dummy_scalars), args.out,
-        input_names=['planes', 'scalars'], output_names=['value'],
-        dynamic_axes={
-            'planes': {0: 'batch', 2: 'height', 3: 'width'},
-            'scalars': {0: 'batch'},
-            'value': {0: 'batch'},
-        },
+        wrapper, (dummy_planes, dummy_scalars), args.out,
+        input_names=['planes', 'scalars'], output_names=output_names,
+        dynamic_axes=dynamic_axes,
         opset_version=args.opset,
         dynamo=False,
     )
@@ -64,12 +98,14 @@ def main():
         sc = rng.random((n, len(spec['scalarNames']))).astype(np.float32)
         got = session.run(None, {'planes': pl, 'scalars': sc})[0].reshape(-1)
         with torch.no_grad():
-            want = model(torch.from_numpy(pl), torch.from_numpy(sc)).numpy()
+            ref = wrapper(torch.from_numpy(pl), torch.from_numpy(sc))
+            want = (ref[0] if head == 'wdl' else ref).numpy()
         delta = float(np.abs(got - want).max())
         print(f"{h}x{w} batch {n}: max |onnx - torch| = {delta:.2e}"
               f"{'  MISMATCH' if delta > 1e-4 else ''}")
 
     meta = {
+        'head': head,
         'planes': planes,
         'derivedCount': spec['derivedCount'],
         'terrainCount': spec['terrainCount'],

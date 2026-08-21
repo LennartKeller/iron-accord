@@ -31,7 +31,19 @@ const modelPath = process.env.MODEL ?? 'models/value.onnx';
 const evaluator = await loadValueNet(modelPath);
 
 type Side = 'net' | 'budgeted' | 'plain' | 'greedy';
-const maxPerLayer = Number(process.env.MAX_PER_LAYER ?? 8);
+/**
+ * Big enough to cover a whole beam layer natively, which 8 was not.
+ *
+ * A layer is at most beamWidth x branching = 36 candidates (planner.ts:25-26),
+ * and those 36 were already narrowed from the legal moves by the greedy scorer
+ * in `topActions`. Capping the net at 8 on top of that left it reordering an
+ * eight-item shortlist the hand-priced evaluation had chosen — so any move that
+ * evaluation misprices, which is the entire diagnosed failure, never reached
+ * the net at all, and a Phase 4 scaling test would not have been testing it.
+ * 36 x ~1.25 ms is about 45 ms per layer, affordable at a 250-800 ms budget.
+ * The tight cut is a wasm concession (valuenet.web.ts) and belongs only there.
+ */
+const maxPerLayer = Number(process.env.MAX_PER_LAYER ?? 36);
 const budgeted = new BudgetedValueNet(evaluator, new HeuristicEvaluator(), maxPerLayer);
 
 function agentFor(side: Side) {

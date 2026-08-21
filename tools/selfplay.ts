@@ -31,7 +31,15 @@ const maxDays = Number(arg('maxDays', '30'));
 // Leave a core for the OS and this process; oversubscribing slows everything.
 const workerCount = Math.max(1, Math.min(Number(arg('workers', '0')) || os.availableParallelism() - 2, games));
 
-const MAPS = [...NAVAL_MAPS, ...LAND_MAPS];
+/**
+ * The default is the benchmark suite, which is the wrong pool to train on: it
+ * was chosen for fast resolution, and fast means forced. `--maps` points at a
+ * JSON list instead — see tools/survey-training-maps.ts.
+ */
+const mapsFile = arg('maps', '');
+const MAPS: string[] = mapsFile
+  ? JSON.parse(fs.readFileSync(mapsFile, 'utf8'))
+  : [...NAVAL_MAPS, ...LAND_MAPS];
 const FOG: Record<string, number[]> = {
   off: [GameEnums.Fog_Off],
   war: [GameEnums.Fog_OfWar],

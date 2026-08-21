@@ -23,6 +23,17 @@ export interface PackedPosition {
   scalars: Float32Array;
   width: number;
   height: number;
+  /**
+   * +1 won, -1 lost, 0 still playing — and the net never sees the first two.
+   *
+   * `extract-positions.ts` only samples while `!game.over`, so a finished board
+   * is a class of position the net has exactly zero training examples of. The
+   * beam reaches them constantly (an HQ capture ends the game mid-turn), and
+   * asking a net to extrapolate there is how "one move from winning" comes to
+   * outrank "won". The hand-priced score has always special-cased this with
+   * ±1e9 (position.ts:50-54); this is the same rule for the learned path.
+   */
+  over: number;
 }
 
 export interface ValueNetMeta {
@@ -74,6 +85,9 @@ export class ValueNetEvaluator implements Evaluator<PackedPosition> {
 
   capture(game: Game, self: Player, _belief: Belief): PackedPosition {
     const encoder = this.encoderFor(game);
+    const over = game.over
+      ? (game.over.winningTeam === self.getTeam() ? 1 : -1)
+      : 0;
     const observation = encoder.encode(game, self.getPlayerID());
     const { width, height } = game.map;
     const planeSize = width * height;
@@ -102,33 +116,41 @@ export class ValueNetEvaluator implements Evaluator<PackedPosition> {
       }
     }
 
-    return { planes: packed, scalars: observation.scalars, width, height };
+    return { planes: packed, scalars: observation.scalars, width, height, over };
   }
 
   async score(batch: PackedPosition[]): Promise<number[]> {
     if (batch.length === 0) return [];
-    const { width, height } = batch[0];
+    // Decided positions are answered outright, and are not worth a forward pass.
+    const live = batch.filter(position => position.over === 0);
+    if (live.length === 0) return batch.map(position => position.over * TERMINAL_SCALE);
+    const { width, height } = live[0];
     const planeCount = 3 + this.meta.derivedCount;
     const scalarCount = this.meta.scalarNames.length;
 
     // Every position in a beam layer is the same board, so one tensor covers
     // the layer. A mixed batch would need padding, and never happens here.
-    const planes = new Uint8Array(batch.length * planeCount * width * height);
-    const scalars = new Float32Array(batch.length * scalarCount);
-    for (let i = 0; i < batch.length; i++) {
-      planes.set(batch[i].planes, i * planeCount * width * height);
-      scalars.set(batch[i].scalars, i * scalarCount);
+    const planes = new Uint8Array(live.length * planeCount * width * height);
+    const scalars = new Float32Array(live.length * scalarCount);
+    for (let i = 0; i < live.length; i++) {
+      planes.set(live[i].planes, i * planeCount * width * height);
+      scalars.set(live[i].scalars, i * scalarCount);
     }
 
     const output = await this.session.run({
-      planes: this.tensors.uint8(planes, [batch.length, planeCount, height, width]),
-      scalars: this.tensors.float32(scalars, [batch.length, scalarCount]),
+      planes: this.tensors.uint8(planes, [live.length, planeCount, height, width]),
+      scalars: this.tensors.float32(scalars, [live.length, scalarCount]),
     });
     const values = output.value.data;
-    const scores: number[] = [];
     // The planner compares scores in funds; the net speaks in [-1, 1]. Scaling
     // keeps the two on one axis so a mixed or blended evaluator stays sane.
-    for (let i = 0; i < batch.length; i++) scores.push(Number(values[i]) * VALUE_SCALE);
+    const scores: number[] = [];
+    let next = 0;
+    for (const position of batch) {
+      scores.push(position.over !== 0
+        ? position.over * TERMINAL_SCALE
+        : Number(values[next++]) * VALUE_SCALE);
+    }
     return scores;
   }
 }
@@ -139,6 +161,15 @@ export class ValueNetEvaluator implements Evaluator<PackedPosition> {
  * swing rather than inventing a second unit of account.
  */
 export const VALUE_SCALE = 100_000;
+
+/**
+ * A decided game outranks every undecided one, whatever the net thinks.
+ *
+ * Above `VALUE_SCALE` so that a win beats the most confident live position and
+ * a loss loses to the worst, which is the property `evaluatePosition`'s ±1e9
+ * buys on the hand-priced side.
+ */
+export const TERMINAL_SCALE = VALUE_SCALE * 2;
 
 /**
  * The value net where it fits in the budget, the hand-priced score everywhere else.

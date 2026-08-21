@@ -57,8 +57,32 @@ export interface GameState {
   /** Each victory rule's script variables, which is all the state they have. */
   victoryRules: Array<{ ruleID: string; variables: Record<string, unknown> }>;
   units: UnitState[];
-  /** Only buildings whose mutable state can change; terrain ids never do. */
   buildings: BuildingState[];
+  /**
+   * Destructible tiles only.
+   *
+   * The old comment here said terrain ids never change. They do: ACTION_FIRE
+   * does `defTerrain.setHp(getHp() - damage)` (ACTION_FIRE.js:833), and walls,
+   * meteors and destroyed pipes swap the tile outright via `replaceTerrainOnly`.
+   * `Game.attackTargets` offers `kind: 'terrain'`, and the planner explores real
+   * `applyAction` calls — so merely *considering* shooting a pipe seam used to
+   * damage it on the live board, permanently and with no log, and the damage
+   * grew with thinking time.
+   *
+   * Only tiles with `hp >= 0` are captured. Plain terrain leaves `hp` at its -1
+   * default (host/terrain.ts:48) and has nothing to restore, so this stays a
+   * handful of entries on the maps that have any and empty on the maps that
+   * do not — the sweep it rides along with is the one buildings already do.
+   */
+  terrain: TerrainState[];
+}
+
+/** A destructible tile: what it was, and how intact. */
+export interface TerrainState {
+  x: number;
+  y: number;
+  terrainID: string;
+  hp: number;
 }
 
 function captureUnit(unit: Unit): UnitState {
@@ -84,9 +108,14 @@ function captureUnit(unit: Unit): UnitState {
 export function snapshot(game: Game): GameState {
   const { map } = game;
   const buildings: BuildingState[] = [];
+  const terrain: TerrainState[] = [];
   for (let y = 0; y < map.height; y++) {
     for (let x = 0; x < map.width; x++) {
-      const building = map.getTerrain(x, y).getBuilding();
+      const field = map.getTerrain(x, y);
+      if (field.getHp() >= 0) {
+        terrain.push({ x, y, terrainID: field.getTerrainID(), hp: field.getHp() });
+      }
+      const building = field.getBuilding();
       if (!building) continue;
       buildings.push({
         x, y,
@@ -115,6 +144,7 @@ export function snapshot(game: Game): GameState {
     victoryRules: map.getGameRules().victoryRuleState(),
     units: map.units.map(captureUnit),
     buildings,
+    terrain,
   };
 }
 
@@ -167,6 +197,18 @@ export function restore(game: Game, state: GameState): void {
 
   map.units.length = 0;
   for (const unitState of state.units) restoreUnit(map, unitState);
+
+  // Terrain first: replacing a tile rebuilds the Terrain object and re-parents
+  // whatever building sits on it, so doing it after the building pass would
+  // hand the restored building to a discarded tile.
+  for (const terrainState of state.terrain) {
+    const field = map.getTerrain(terrainState.x, terrainState.y);
+    if (!field) continue;
+    if (field.getTerrainID() !== terrainState.terrainID) {
+      map.replaceTerrainOnly(terrainState.terrainID, terrainState.x, terrainState.y);
+    }
+    map.getTerrain(terrainState.x, terrainState.y).setHp(terrainState.hp);
+  }
 
   // Buildings are placed by the map; only ownership and condition are restored.
   for (const buildingState of state.buildings) {

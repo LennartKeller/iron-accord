@@ -4,4 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "numpy>=2.5.2",
+    "onnx>=1.22.0",
+    "onnxruntime>=1.29.0",
+    "torch>=2.13.0",
+    "wandb>=0.28.2",
+]

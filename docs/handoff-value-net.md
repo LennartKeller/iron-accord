@@ -137,11 +137,15 @@ Generate with `--agents heuristic,heuristic`. Consider a slice of
 diversity: a net trained only on one agent's positions learns that agent's
 blind spots.
 
-### Phase 2 — position extraction
+### Phase 2 — position extraction — **built**
 
-New tool, `tools/extract-positions.ts`. Replay each game, and at every Nth
-action emit `(encoded position, label)` where the label is the final result
-from the acting player's view.
+`tools/extract-positions.ts`. Replays each game and emits `(encoded position,
+label)` from the acting player's view, sharded by map into `train/` and
+`validation/`.
+
+```bash
+node tools/extract-positions.ts --in data/selfplay.jsonl.gz --out data/positions
+```
 
 - Encode with `ObservationEncoder.fromGame(game)` — already fixed-vocabulary.
 - Only sample positions at turn boundaries or every K actions; consecutive
@@ -159,13 +163,19 @@ that is a different and much smaller subset (see relabelling, below).
 
 **Label the outcome as a class, not a scalar** — win / draw / loss. See Phase 3.
 
-**Sample a fixed number of positions per game, not every Nth action.** Drawn
-games run to the cap by construction while decisive games end early, so
-per-action sampling over-represents draws at *position* level well beyond their
-~21% of games — plausibly 30%+. Measure the position-level split before
-choosing. If it is skewed, a fixed per-game budget removes the skew without
-discarding anything, which is the honest version of the "draws dominate the
-loss" concern.
+**Sampling is per player-turn (`--perTurn`), not per Nth action** — already
+fixed, and worth knowing why. The winning side has more units, so it takes more
+actions per turn, so a plain stride hands it more samples: a 64-game probe came
+out 33% win / 21% loss purely from that. Turns alternate, so a per-turn budget
+balances the seats by construction. Measured on a 144-game probe: **win 33.8% /
+draw 35.8% / loss 30.4%** — seats balanced, as intended.
+
+What per-turn budgeting does *not* fix is game length. Drawn games run to the
+cap while decisive ones end early, so draws stay over-represented at position
+level (35.8% here against ~21% of games; the trainer's own note says ~40% on a
+larger set). That is a class-prior problem, not a labelling error, and it is
+what `--draw-weight` and the WDL class weighting exist for. Do not "fix" it by
+dropping positions.
 
 **Relabel the cut-off games rather than guessing at them.** `reason` only
 distinguishes `victory` / `step-limit` / `day-limit` (`src/ai/agent.ts:33`), so a
@@ -190,7 +200,15 @@ than imposed by a hand-chosen γ.
 **Acceptance:** re-encoding the same replay twice is bit-identical, and the class
 balance roughly matches the outcome split.
 
-### Phase 3 — train
+### Phase 3 — train — **built**
+
+`tools/train_value.py`, `tools/export_onnx.py`. Python env is `uv`-managed:
+
+```bash
+uv sync
+.venv/bin/python tools/train_value.py --data data/positions --epochs 12
+.venv/bin/python tools/export_onnx.py --checkpoint models/value.pt --out models/value.onnx
+```
 
 Small and fully convolutional, because boards vary from 5×5 to 31×16:
 
@@ -198,9 +216,14 @@ Small and fully convolutional, because boards vary from 5×5 to 31×16:
 - Head: global average pool **and** global max pool, concatenated with the 5
   scalars (`funds, day, unitCount, enemyUnitCount, incomeShare`), small MLP.
 - ~450k parameters.
-- **WDL output, not a scalar `tanh`.** Three-way softmax over {win, draw, loss},
-  cross-entropy against the observed outcome. Collapse to a scalar for search
-  ordering with `P(win) − P(loss)`.
+- **WDL output, not a scalar `tanh`** — `--head wdl`, the default. Three logits
+  over {loss, draw, win} (that index order, 0/1/2), cross-entropy against the
+  observed outcome, collapsed for search ordering to `P(win) − P(loss)`.
+  `--head scalar` keeps the original tanh/MSE path so the two can be A/B'd on
+  one dataset rather than argued about; both report `mse` and `rank` on the
+  same axis for exactly that reason.
+- `--draw-weight` is the draw class weight under `wdl`, a per-sample multiplier
+  under `scalar`. Same knob, the shape each loss wants.
 - **D4 augmentation** (8-fold flips/rotations) is valid — Advance Wars rules are
   isotropic — and is free data.
 - No seat flipping needed: observations are already written "mine"/"theirs".
@@ -226,14 +249,30 @@ the browser.
 
 **Acceptance:** held-out cross-entropy beats a constant class-prior predictor by
 a wide margin, *and* `P(win) − P(loss)` ranks held-out positions better than
-`evaluatePosition` — score both on the same held-out positions before wiring
-anything up. Check the draw class specifically: a net that never predicts *draw*
-has learned the prior, not the position.
+`evaluatePosition` — the run prints both as `rank net … vs heuristic …` and ends
+on `HEURISTIC STILL WINS` until it does. Watch the `draw n%/m%` column,
+predicted rate against true: a net stuck at 0% has learned the prior, not the
+position, and one thrashing 0% → 45% → 1% across epochs has not converged.
+Both are invisible to a scalar head, which is half the point of this one.
 
-### Phase 4 — wire it into the planner
+### Phase 4 — wire it into the planner — **built**
 
-Implement `Evaluator<Float32Array>`: `capture` encodes the position, `score`
-runs one batched forward pass per beam layer.
+`src/ai/onnx-evaluator.ts`: `ValueNetEvaluator` implements the `Evaluator`
+split, `capture` packing the same uint8 index planes the extractor writes.
+`valuenet.node.ts` / `valuenet.web.ts` load the one `.onnx` per runtime.
+
+It reads the graph's `value` output *by name*, so the WDL export keeps that name
+and carries the distribution beside it under `wdl` — the TS side needed no
+change, and the probabilities are there when a draw-aware search wants them.
+
+**Inference cost is the binding constraint.** The net is ~1.25 ms per position
+natively and ~10 ms under wasm, against microseconds for `evaluatePosition`, so
+a 250 ms turn buys ~200 net evaluations in Node and ~24 in a browser — and a
+beam given 24 evaluations plays worse than no search at all. `BudgetedValueNet`
+therefore ranks each layer with the cheap score and sends only its best few to
+the net, the rest keeping cheap ordering below them. Measured on Central Lake:
+at 250 ms the net planner wins by day 24; at 60 ms it is still shuffling units
+on day 201.
 
 **Acceptance — this is the real test:** the time-scaling curve must *invert*.
 Today 150 ms → 800 ms takes the planner from 0.484 to 0.406. With a value net

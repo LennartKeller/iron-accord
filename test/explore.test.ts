@@ -29,6 +29,27 @@ describe('explore', () => {
     expect(Array.from(env.observe().planes)).toEqual(Array.from(before.planes));
   });
 
+  it('puts destructible terrain back', () => {
+    // ACTION_FIRE damages terrain in place (ACTION_FIRE.js:833) and walls,
+    // meteors and destroyed pipes swap the tile outright. A rollback that
+    // tracked only units and buildings left the planner demolishing the live
+    // board just by thinking about shooting it — permanently, with no log, and
+    // worse the longer it thought.
+    const { game, env } = loadGame(5);
+    const before = game.map.getTerrain(0, 0);
+    before.setHp(10);
+    const beforeID = before.getTerrainID();
+    const other = beforeID === 'PLAINS' ? 'SEA' : 'PLAINS';
+
+    env.explore(() => {
+      game.map.getTerrain(0, 0).setHp(3);
+      game.map.replaceTerrainOnly(other, 0, 0);
+    });
+
+    expect(game.map.getTerrain(0, 0).getTerrainID()).toBe(beforeID);
+    expect(game.map.getTerrain(0, 0).getHp()).toBe(10);
+  });
+
   it('does not spend the randomness the real game will use', () => {
     // A search agent simulates attacks to decide what to play. If exploring
     // consumed the shared luck stream, the outcome of the move it finally makes

@@ -77,6 +77,27 @@ function pwaAssets(): Plugin {
 }
 
 /**
+ * Emits the trained value net, if there is one.
+ *
+ * The model is a generated artefact: `models/` is gitignored, so a clean CI
+ * checkout has no model and a static import of it fails the entire build. This
+ * emits the pair when present and stays silent when absent, which keeps the web
+ * build independent of whether anyone has trained anything yet.
+ */
+function valueNetAssets(): Plugin {
+  return {
+    name: 'iron-accord-value-net',
+    generateBundle() {
+      for (const name of ['value.onnx', 'value.json']) {
+        const full = path.resolve('models', name);
+        if (!fs.existsSync(full)) continue;
+        this.emitFile({ type: 'asset', fileName: name, source: fs.readFileSync(full) });
+      }
+    },
+  };
+}
+
+/**
  * `base` must match the path the site is served from. A GitHub Pages project
  * site lives at /<repo>/, so the deploy workflow sets IRON_ACCORD_BASE; local
  * development serves from the root.
@@ -85,7 +106,7 @@ export default defineConfig({
   base: process.env.IRON_ACCORD_BASE ?? '/',
   root: 'web',
   publicDir: '../data',
-  plugins: [pwaAssets()],
+  plugins: [pwaAssets(), valueNetAssets()],
   // Left to the dependency pre-bundler, onnxruntime-web's internal URL for its
   // .wasm is not rewritten, so dev fetches it from a path that falls through to
   // index.html and the runtime reports "no available backend". Excluded, Vite

@@ -20,7 +20,11 @@ async function duel(file: string, seed: number, plannerSeat: number, fog: number
   map.getGameRules().setFogMode(fog);
   const game = new Game(map, registry, animations);
   map.vision.update();
-  const env = new GameEnvironment(map, registry, { maxDays: 30, maxFieldChoices: 6, rng, seed }, game);
+  // 60, not 30, to match the day cap the training data was generated and
+  // labelled at. At 30 a game the net was taught to call a win by day 45 scores
+  // as a draw here, so the benchmark would be grading against a different
+  // objective than the one the net optimises.
+  const env = new GameEnvironment(map, registry, { maxDays: 60, maxFieldChoices: 6, rng, seed }, game);
   env.reset(seed);
   const planner = new PlannerAgent({ timeBudgetMs: budget });
   const greedy = new HeuristicAgent();

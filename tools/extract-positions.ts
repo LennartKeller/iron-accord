@@ -49,6 +49,21 @@ function arg(name: string, fallback: string): string {
 }
 
 const inFile = arg('in', 'data/pilot.jsonl.gz');
+/**
+ * Restrict extraction to a map list, dropping replays from anything else.
+ *
+ * Needed because a replay file can contain maps the host cannot simulate
+ * faithfully: METEOR.js calls `terrain.createTerrainFindingSystem`, which this
+ * shim does not implement, so destroying a meteor throws *inside* an animation
+ * callback — after the meteor is gone and before the plasma cleanup runs. The
+ * action is abandoned part-way and the board is silently wrong from there on,
+ * which is trap #7 in the handoff exactly. Two of the wide pool's maps have
+ * meteors; the games are already recorded, so they get filtered here.
+ */
+const onlyFile = arg('only', '');
+const only: Set<string> | null = onlyFile
+  ? new Set(JSON.parse(fs.readFileSync(onlyFile, 'utf8')) as string[])
+  : null;
 const outDir = arg('out', 'data/positions');
 /**
  * Positions to take from each player-turn, evenly spaced through it.
@@ -71,6 +86,36 @@ const baseline = arg('baseline', '1') !== '0';
 
 const { registry, animations, rng } = bootstrap();
 const trainSet = new Set(TRAIN_MAPS);
+
+/**
+ * Which split a map lands in.
+ *
+ * `hash` is the default because the training pool is no longer the benchmark
+ * suite: `TRAIN_MAPS` names twelve specific maps, so a wide-pool run measured
+ * against it would put every single map in validation and leave nothing to
+ * train on. Hashing the name gives a stable, roughly `--valFraction` split over
+ * whatever pool the data actually contains, and gives the same answer on every
+ * re-run — a map cannot drift across the split between extractions.
+ *
+ * `benchmark` keeps the old behaviour for data generated on the benchmark suite.
+ */
+const splitMode = arg('split', 'hash');
+const valFraction = Number(arg('valFraction', '0.2'));
+
+/** FNV-1a. Small, stable, and not dependent on a runtime's string hashing. */
+function hashOf(text: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function splitFor(map: string): string {
+  if (splitMode === 'benchmark') return trainSet.has(map) ? 'train' : 'validation';
+  return (hashOf(map) % 1000) / 1000 < valFraction ? 'validation' : 'train';
+}
 const evaluator = new HeuristicEvaluator();
 
 /** One map's accumulating shard. Fixed H/W is what makes this a rectangular array. */
@@ -118,7 +163,7 @@ function bucketFor(replay: Replay, width: number, height: number): Bucket {
     bucket = {
       map: replay.map,
       slug: slugify(replay.map),
-      split: trainSet.has(replay.map) ? 'train' : 'validation',
+      split: splitFor(replay.map),
       width, height,
       planes: new Uint8Array(shardSize * (3 + derivedCount) * width * height),
       scalars: new Float32Array(shardSize * scalarCount),
@@ -245,12 +290,14 @@ const lines = readline.createInterface({
 
 let games = 0, positions = 0, diverged = 0;
 const labelTally = { win: 0, draw: 0, loss: 0 };
+let skipped = 0;
 const started = Date.now();
 
 for await (const line of lines) {
   if (!line.trim()) continue;
   if (games >= limit) break;
   const replay: Replay = JSON.parse(line);
+  if (only && !only.has(replay.map)) { skipped++; continue; }
 
   let source = sources.get(replay.map);
   if (!source) {
@@ -364,6 +411,7 @@ fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify({
 
 const total = labelTally.win + labelTally.draw + labelTally.loss;
 console.log(`\n${games} games -> ${positions} positions in ${((Date.now() - started) / 1000).toFixed(0)}s`);
+if (skipped) console.log(`skipped ${skipped} replays on maps outside ${onlyFile}`);
 console.log(`labels: win ${(labelTally.win / total * 100).toFixed(1)}%  ` +
   `draw ${(labelTally.draw / total * 100).toFixed(1)}%  loss ${(labelTally.loss / total * 100).toFixed(1)}%`);
 console.log(`shards: ${manifest.length} across ${buckets.size} maps ` +

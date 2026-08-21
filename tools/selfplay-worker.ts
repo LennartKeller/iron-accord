@@ -47,9 +47,15 @@ export interface Replay {
 const { registry, animations, rng } = bootstrap();
 const sources = new Map<string, ReturnType<typeof readMap>>();
 
-function agentFor(name: string): Agent {
+/**
+ * `seed` matters only for the random agent, and it matters a lot: on a fixed
+ * seed it replays one stream, so every game on a map comes out identical and
+ * the slice adds no diversity at all — the exact failure the wider map pool is
+ * meant to fix. Derived from the job seed, so a job still reproduces exactly.
+ */
+function agentFor(name: string, seed: number): Agent {
   if (name === 'planner') return new PlannerAgent({ timeBudgetMs: 150 });
-  if (name === 'random') return new RandomAgent(3);
+  if (name === 'random') return new RandomAgent(seed);
   return new HeuristicAgent();
 }
 
@@ -70,7 +76,8 @@ async function play(job: Job): Promise<Replay> {
 
   const actions: Replay['actions'] = [];
   const started = Date.now();
-  const result = await playMatch(env, job.agents.map(agentFor), {
+  const result = await playMatch(env, job.agents.map(
+    (name, seat) => agentFor(name, job.seed * 31 + seat + 1)), {
     maxSteps: 8000,
     onStep: (_step, action, player) => { actions.push({ player, action }); },
   });
