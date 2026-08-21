@@ -86,6 +86,11 @@ export default defineConfig({
   root: 'web',
   publicDir: '../data',
   plugins: [pwaAssets()],
+  // Left to the dependency pre-bundler, onnxruntime-web's internal URL for its
+  // .wasm is not rewritten, so dev fetches it from a path that falls through to
+  // index.html and the runtime reports "no available backend". Excluded, Vite
+  // resolves that URL the same way in dev as it does in the build.
+  optimizeDeps: { exclude: ['onnxruntime-web'] },
   server: {
     host: true,
     fs: { allow: ['..'] },

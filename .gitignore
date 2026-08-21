@@ -1,3 +1,4 @@
+wandb/
 node_modules/
 dist/
 *.tsbuildinfo
@@ -6,3 +7,8 @@ dist/
 # Generated from the Commander_Wars submodule by `npm run build:data`.
 # ~2000 files that are reproducible in one command, so they stay out of git.
 data/
+
+# Python env and trained models for the value net.
+.venv/
+models/
+__pycache__/

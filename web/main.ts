@@ -14,6 +14,7 @@ import {
   GameEnvironment, HeuristicAgent, PlannerAgent, applyAction, enumerateActions,
   type Agent,
 } from '../src/ai/index.ts';
+import { ValueNetAgent } from '../src/ai/valuenet.web.ts';
 import { defaultConfig, sanitizeConfig, LIMITS, type GameConfig, type SeatController } from '../src/game/config.ts';
 import { GameEnums, type AnimationRunner, type Unit } from '../src/host/index.ts';
 import type { ScriptRegistry } from '../src/scripts/types.ts';
@@ -68,6 +69,8 @@ const AGENTS: Record<string, () => Agent> = {
   heuristic: () => new HeuristicAgent(),
   // A visible turn should not stall on a phone, so the search is kept short.
   planner: () => new PlannerAgent({ timeBudgetMs: 250 }),
+  // Same search, learned position evaluation. The model loads on first use.
+  valuenet: () => new ValueNetAgent(250),
 };
 
 const agents = new Map<number, Agent>();
