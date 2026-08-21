@@ -3,9 +3,9 @@
 You are picking up AI work on iron-accord. This is the canonical brief — it
 travels with the repo, so treat it as the source of truth over any chat summary.
 
-Everything below was measured on a 10-core laptop. You are presumably on the
-64-core / 2×4090 / 96 GB workstation, which changes the arithmetic but none of
-the conclusions.
+Everything below was measured on a 10-core laptop. The workstation it moved to
+is a Ryzen 9 7950X — **16 cores / 32 threads**, not the 64 assumed here — with
+2×4090 and 93 GB. That changes the arithmetic but none of the conclusions.
 
 ---
 
@@ -119,10 +119,14 @@ node tools/selfplay.ts --games 50000 --maxDays 60 --out data/selfplay.jsonl.gz
 node tools/replay-check.ts data/selfplay.jsonl.gz 200
 ```
 
-At laptop speed that is ~7 h; expect well under an hour on 64 cores. Check
-`--workers` scaling first — laptop scaling was sublinear (4→8 workers gained
-only 35%) but that is almost certainly Apple's performance/efficiency core split,
-not a real ceiling.
+At laptop speed that is ~7 h. `selfplay.ts` defaults to
+`availableParallelism() - 2` = **30 workers** here; at linear scaling off the
+laptop's 8-worker 2.0 games/s that is ~2 h, so treat anything near that as
+success and anything far above it as a scaling problem. Check `--workers`
+scaling first — laptop scaling was sublinear (4→8 workers gained only 35%), but
+that is almost certainly Apple's performance/efficiency core split, and this
+machine's 32 threads are uniform (16 physical + SMT), so the probe answers a
+different question: where SMT stops paying.
 
 **Acceptance:** `replay-check` reports 200/200 reproduced, and the outcome split
 is near-even (the laptop run gave 197/202/201). A seat skew means jobs stopped
@@ -137,16 +141,53 @@ blind spots.
 
 New tool, `tools/extract-positions.ts`. Replay each game, and at every Nth
 action emit `(encoded position, label)` where the label is the final result
-from the acting player's view: `+1 / 0 / -1`.
+from the acting player's view.
 
 - Encode with `ObservationEncoder.fromGame(game)` — already fixed-vocabulary.
 - Only sample positions at turn boundaries or every K actions; consecutive
   positions are near-identical and inflate the dataset without adding signal.
 - Write NPZ or raw f32 shards for the trainer.
-- **Consider discounting toward the end** (`label * γ^(turns_remaining)`) so an
-  early position in a won game is not labelled as confidently as the winning move.
 
-**Acceptance:** re-encoding the same replay twice is bit-identical, and label
+**Draws are kept, and labelled as draws.** Dropping them is tempting — a fifth
+of the set carrying the least varied label — and it is a trap. Draws are not a
+random 20%, they are the balanced, closed, no-breakthrough *region* of position
+space. Train without them and every label is ±1, so the net learns positions are
+won or lost and has no calibrated way to say "dead even" — which is exactly the
+discrimination a beam search needs when ranking candidate lines that are all
+roughly level. Label 0 is not an uninformative label; a *wrong* label is, and
+that is a different and much smaller subset (see relabelling, below).
+
+**Label the outcome as a class, not a scalar** — win / draw / loss. See Phase 3.
+
+**Sample a fixed number of positions per game, not every Nth action.** Drawn
+games run to the cap by construction while decisive games end early, so
+per-action sampling over-represents draws at *position* level well beyond their
+~21% of games — plausibly 30%+. Measure the position-level split before
+choosing. If it is skewed, a fixed per-game budget removes the skew without
+discarding anything, which is the honest version of the "draws dominate the
+loss" concern.
+
+**Relabel the cut-off games rather than guessing at them.** `reason` only
+distinguishes `victory` / `step-limit` / `day-limit` (`src/ai/agent.ts:33`), so a
+genuine stalemate and a slow decisive game that ran out of clock both surface as
+`day-limit` — there is no per-game flag separating them, and the 19% / 1.4%
+split in §4 is a population-level inference from the plateau across caps
+(34.7 → 20.8 → 19.4), not a property of any single replay. But `maxDays` only
+feeds the `done` check (`src/ai/environment.ts:111`) and never reaches an agent,
+so re-running a drawn game's exact `(map, seed, fog, agents)` at `--maxDays 120`
+replays the identical prefix and continues past the cap. Run that over the
+`day-limit` games only — ~21% of the set — and the estimate becomes per-game
+truth.
+
+**No γ discount.** The earlier suggestion was `label * γ^(turns_remaining)`, so
+an early position in a won game is not labelled as confidently as the winning
+move. It interacts badly with draws: discounting pulls decisive-but-early labels
+toward 0, which is precisely where the draws sit, blurring the two classes the
+net most needs to separate. With a WDL head that uncertainty is expressed as the
+entropy of the predicted distribution instead — learned from the data rather
+than imposed by a hand-chosen γ.
+
+**Acceptance:** re-encoding the same replay twice is bit-identical, and the class
 balance roughly matches the outcome split.
 
 ### Phase 3 — train
@@ -155,19 +196,39 @@ Small and fully convolutional, because boards vary from 5×5 to 31×16:
 
 - 3×3 conv → 64 channels, then ~6 residual blocks (conv-BN-ReLU ×2 + skip).
 - Head: global average pool **and** global max pool, concatenated with the 5
-  scalars (`funds, day, unitCount, enemyUnitCount, incomeShare`), small MLP, `tanh`.
-- ~450k parameters. MSE against the outcome label.
+  scalars (`funds, day, unitCount, enemyUnitCount, incomeShare`), small MLP.
+- ~450k parameters.
+- **WDL output, not a scalar `tanh`.** Three-way softmax over {win, draw, loss},
+  cross-entropy against the observed outcome. Collapse to a scalar for search
+  ordering with `P(win) − P(loss)`.
 - **D4 augmentation** (8-fold flips/rotations) is valid — Advance Wars rules are
   isotropic — and is free data.
 - No seat flipping needed: observations are already written "mine"/"theirs".
+
+**Why WDL and not the scalar.** A scalar value head structurally cannot
+distinguish a certain draw from a 50/50 win-or-loss — both sit at 0. At ~21%
+draws that conflation is a fifth of the dataset rather than a corner case, and
+the positions it smears together are exactly the balanced ones a beam search
+spends its time ranking. The three-way head lets the net assert "this is
+drawish" positively instead of by omission. It is why Leela grew one.
+
+**The failure this guards against.** The planner is a maximiser, so any region
+where the eval is systematically overconfident is a region the search will steer
+into. Today's diagnosis — more search makes the planner *worse* — is that
+failure with hand-priced weights. Dropping draws, or collapsing them into the
+same output value as balanced-but-decisive positions, rebuilds the same failure
+with a net, and hides it: held-out MSE would look fine while the search walked
+into stalemates it scored as won.
 
 One 4090 is more than enough; the second will idle. PyTorch → **ONNX**, run in
 JS via `onnxruntime-node` / `onnxruntime-web` so the same file serves Node and
 the browser.
 
-**Acceptance:** held-out MSE beats a constant predictor by a wide margin, *and*
-the net ranks positions better than `evaluatePosition` — score both on the same
-held-out positions before wiring anything up.
+**Acceptance:** held-out cross-entropy beats a constant class-prior predictor by
+a wide margin, *and* `P(win) − P(loss)` ranks held-out positions better than
+`evaluatePosition` — score both on the same held-out positions before wiring
+anything up. Check the draw class specifically: a net that never predicts *draw*
+has learned the prior, not the position.
 
 ### Phase 4 — wire it into the planner
 
@@ -232,6 +293,8 @@ transport work, kept only as an A/B baseline. Delete it once the heuristic settl
 - **226 one-hot channels or learned embeddings?** Most channels are all-zero on
   any given map. Index planes plus an embedding layer would be smaller and
   probably train better, but changes the `Observation` contract.
-- **~19% of games are genuine stalemates.** Positions in them are honestly
-  worth 0, but a fifth of the dataset carrying the least informative label is
-  worth a second look.
+- ~~**~19% of games are genuine stalemates.**~~ Settled: keep them, label them
+  as a third class, and fix the *position-level* over-representation by sampling
+  a fixed budget per game. See Phase 2. Still open is the measurement — what
+  fraction of sampled positions actually come from drawn games, and how many of
+  the `day-limit` draws relabel as decisive at `--maxDays 120`.
