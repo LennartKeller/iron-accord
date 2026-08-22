@@ -46,14 +46,31 @@ export class Unit {
   readonly visionBonus: Array<{ value: number; duration: number }> = [];
   /** Units carried by a transport. */
   readonly loaded: Unit[] = [];
+  /** Lazily resolved movement type; see getBaseMovementCosts. */
+  private movementTypeCache: string | null = null;
 
   readonly map: GameMap;
   readonly unitID: string;
   private owner: Player;
-  x: number;
-  y: number;
+  // Position is an accessor pair so ANY assignment — moveUnitToField, unload,
+  // snapshot restore — invalidates the map's tile→unit index. A missed
+  // invalidation here would silently corrupt occupancy checks, so the backing
+  // fields are written only by these setters.
+  private xValue = 0;
+  private yValue = 0;
+  get x(): number { return this.xValue; }
+  set x(value: number) {
+    this.xValue = value;
+    this.map.markUnitsDirty();
+  }
+  get y(): number { return this.yValue; }
+  set y(value: number) {
+    this.yValue = value;
+    this.map.markUnitsDirty();
+  }
 
   constructor(map: GameMap, unitID: string, owner: Player, x: number, y: number) {
+    // map must be set first: the x/y setters dirty its unit index.
     this.map = map;
     this.unitID = unitID;
     this.owner = owner;
@@ -251,11 +268,42 @@ export class Unit {
    * A negative result means the tile is impassable for this movement type.
    */
   getBaseMovementCosts(x: number, y: number, curX = -1, curY = -1): number {
-    const table = this.map.registry[this.getMovementType()];
+    const map = this.map;
+    // Movement type never changes for a unit id (the scripts answer with a
+    // literal), so resolve it once per unit and skip the map lookup after.
+    const type = this.movementTypeCache ?? (this.movementTypeCache = map.movementTypeOf(this));
+    const entry = map.moveCostEntry(type);
+    const table = entry.table;
     if (!table?.getMovementpoints) return -1;
-    const target = this.map.getTerrain(x, y);
-    const current = curX >= 0 && curY >= 0 ? this.map.getTerrain(curX, curY) : target;
-    const result = table.getMovementpoints(target, this, current, false, this.map);
+    // Fast path: for tables that promise per-tile costs (getSupportsFastPfs,
+    // the same contract the desktop engine's fast pathfinding keys on) the
+    // answer is cached per tile in the map, invalidated by its board version.
+    // Two exclusions keep this exact: gate/fort tiles, whose cost depends on
+    // the asking unit's alliance, are marked Infinity and always re-asked; and
+    // off-map coordinates fall through so they throw exactly as before.
+    if (entry.fast && map.onMap(x, y)) {
+      const index = y * map.width + x;
+      const cached = entry.costs[index];
+      if (cached === cached) { // not NaN — already computed
+        if (cached !== Infinity) return cached;
+      } else {
+        const target = map.getTerrain(x, y);
+        const id = target.getID();
+        if (id !== 'ZGATE_E_W' && id !== 'ZGATE_N_S' && id !== 'FORTHQ') {
+          // currentTerrain is passed but unused by every fast table (only
+          // MOVE_HOVERCRAFT reads it, and it opted out of fast pfs), so the
+          // cached call may hand over the target tile in its place.
+          const result = table.getMovementpoints(target, this, target, false, map);
+          const value = typeof result === 'number' ? result : -1;
+          entry.costs[index] = value;
+          return value;
+        }
+        entry.costs[index] = Infinity;
+      }
+    }
+    const target = map.getTerrain(x, y);
+    const current = curX >= 0 && curY >= 0 ? map.getTerrain(curX, curY) : target;
+    const result = table.getMovementpoints(target, this, current, false, map);
     return typeof result === 'number' ? result : -1;
   }
 
@@ -310,8 +358,7 @@ export class Unit {
 
   /** The action ids this unit's script offers, e.g. ACTION_FIRE, ACTION_CAPTURE. */
   getActionList(): string[] {
-    const list = this.map.registry[this.unitID]?.actionList;
-    return Array.isArray(list) ? [...list] : [];
+    return [...this.map.actionListOf(this.unitID)];
   }
 
   getMinRange(_position?: QPoint): number { return this.minRange; }

@@ -72,10 +72,25 @@ import { BuildingHost } from './building.ts';
 export type Building = BuildingHost;
 
 export class Terrain {
-  building: Building | null = null;
+  // What a tile IS — its id, its building, its base-terrain chain — feeds the
+  // movement-cost cache on GameMap, so those three are accessors whose setters
+  // bump the map's board version. Snapshot restore and the map loader assign
+  // these fields directly, which is exactly why plain fields would let a stale
+  // cache survive a rewind. Backing fields are written only by the setters.
+  private buildingValue: Building | null = null;
+  get building(): Building | null { return this.buildingValue; }
+  set building(value: Building | null) {
+    this.buildingValue = value;
+    this.map.boardVersion++;
+  }
   hp = -1;
   /** Nested terrain (e.g. a FOREST drawn on top of a PLAINS base). */
-  baseTerrain: Terrain | null = null;
+  private baseTerrainValue: Terrain | null = null;
+  get baseTerrain(): Terrain | null { return this.baseTerrainValue; }
+  set baseTerrain(value: Terrain | null) {
+    this.baseTerrainValue = value;
+    this.map.boardVersion++;
+  }
   palette = '';
   visionHigh = 0;
   readonly variables = new ScriptVariables();
@@ -86,9 +101,15 @@ export class Terrain {
   readonly map: GameMap;
   readonly x: number;
   readonly y: number;
-  terrainID: string;
+  private terrainIDValue!: string;
+  get terrainID(): string { return this.terrainIDValue; }
+  set terrainID(value: string) {
+    this.terrainIDValue = value;
+    this.map.boardVersion++;
+  }
 
   constructor(map: GameMap, x: number, y: number, terrainID: string) {
+    // map must be set first: the terrainID setter bumps its board version.
     this.map = map;
     this.x = x;
     this.y = y;
