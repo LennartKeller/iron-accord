@@ -1,6 +1,6 @@
-import type { CommanderWarsMap, MapTile } from './mapreader.ts';
+import type { CommanderWarsMap, MapTile, MapUnit } from './mapreader.ts';
 import type { ScriptRegistry } from '../scripts/types.ts';
-import { GameMap, Terrain, BuildingHost, type SpriteIndex } from '../host/index.ts';
+import { GameMap, Terrain, BuildingHost, type SpriteIndex, type Unit } from '../host/index.ts';
 
 /**
  * Turns a parsed .map into a live host GameMap so the Commander Wars terrain
@@ -79,14 +79,54 @@ export function loadIntoGameMap(
     for (let x = 0; x < source.header.width; x++) {
       const tile = source.tiles[y][x];
       if (!tile.unit) continue;
-      const owner = map.getPlayer(tile.unit.playerID);
-      if (!owner) continue;
-      const unit = map.addUnit(tile.unit.unitID, owner, x, y);
-      unit.setHp(tile.unit.hp);
+      buildUnit(map, tile.unit, x, y);
     }
   }
 
   return map;
+}
+
+/**
+ * game/unit.cpp: Unit::deserializer — initUnit() (our Unit constructor, which
+ * runs the unit script's init) fires first, then the stored fields override
+ * its defaults. Map files are never savegames, so a negative ammo/fuel value
+ * is the editor's "untouched" sentinel: the C++ refills to max in that case,
+ * which is exactly what init just did, so we keep the script default.
+ */
+function buildUnit(map: GameMap, stored: MapUnit, x: number, y: number): Unit | null {
+  const owner = map.getPlayer(stored.playerID);
+  if (!owner) return null;
+  const unit = map.addUnit(stored.unitID, owner, x, y);
+  unit.setUnitRank(stored.rank);
+  unit.setHp(stored.hp);
+  unit.setHasMoved(stored.hasMoved);
+  unit.setCapturePoints(stored.capturePoints);
+  unit.setHidden(stored.hidden);
+
+  // game/unit.cpp keeps a repair for maps saved with the two weapon slots
+  // swapped: each stored value matching the OTHER slot's capacity is the tell
+  // (e.g. the MECHs in advance_wars_1_campaign.camp/Air Ace.map).
+  let ammo1 = stored.ammo1;
+  let ammo2 = stored.ammo2;
+  if (ammo1 === unit.getMaxAmmo2() && ammo2 === unit.getMaxAmmo1()) {
+    const buffer = ammo1;
+    ammo1 = ammo2;
+    ammo2 = buffer;
+  }
+  if (ammo1 >= 0) unit.setAmmo1(ammo1);
+  if (ammo2 >= 0) unit.setAmmo2(ammo2);
+  if (stored.fuel >= 0) unit.setFuel(stored.fuel);
+
+  for (const carried of stored.transported) {
+    // Carried units are not on the board (they live only in the transport's
+    // hold), so build them at the transport's tile and then take them back off
+    // the roster — the same shape as snapshot.ts restoreUnit.
+    const cargo = buildUnit(map, carried, x, y);
+    if (!cargo) continue;
+    map.removeUnit(cargo);
+    unit.loaded.push(cargo);
+  }
+  return unit;
 }
 
 /**
