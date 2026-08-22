@@ -39,10 +39,15 @@ export class SceneRenderer {
   highlights: Highlight[] = [];
   showGrid = false;
 
-  constructor(
-    private readonly canvas: HTMLCanvasElement,
-    private readonly sprites: SpriteStore,
-  ) {
+  // Written out rather than declared as constructor parameter properties:
+  // plain `node` type stripping erases the annotations but cannot generate the
+  // assignments they imply, so the fields would silently stay undefined.
+  private readonly canvas: HTMLCanvasElement;
+  private readonly sprites: SpriteStore;
+
+  constructor(canvas: HTMLCanvasElement, sprites: SpriteStore) {
+    this.canvas = canvas;
+    this.sprites = sprites;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('SceneRenderer: 2d context unavailable');
     this.ctx = ctx;

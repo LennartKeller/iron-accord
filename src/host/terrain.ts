@@ -1,6 +1,6 @@
 import type { GameMap } from './gamemap.ts';
 import type { Unit } from './unit.ts';
-import { Qt, type QPoint } from './globals.ts';
+import { PointVector, Qt, type QPoint } from './globals.ts';
 import { GameEnums } from './enums.ts';
 import { ScriptVariables } from './variables.ts';
 
@@ -36,6 +36,34 @@ export interface SpriteRequest {
   id: string;
   kind: 'base' | 'overlay';
   palette: string;
+}
+
+/**
+ * game/terrainfindingsystem.cpp: TerrainFindingSystem — a flood fill that
+ * collects the connected group of same-id tiles around a start tile.
+ * METEOR.getPlasmaFields walks it so destroying a meteor melts the whole
+ * plasma web it anchors; without it that script throws part-way and the
+ * plasma stays on the board forever. The C++ class also derives river flow
+ * animation data (getFlowData); no script we run asks for that, so only the
+ * search half is mirrored here.
+ */
+export class TerrainFindingSystem {
+  private readonly points: QPoint[];
+
+  constructor(points: QPoint[]) {
+    this.points = points;
+  }
+
+  /**
+   * coreengine/pathfindingsystem.cpp:225 PathFindingSystem::getAllQmlVectorPoints
+   * — every reached tile, emitted x-major/y-minor, the start tile included.
+   */
+  getAllQmlVectorPoints(): PointVector {
+    return new PointVector(this.points.slice());
+  }
+
+  /** C++ heap bookkeeping (game/terrain.h:257); garbage collection makes it a no-op. */
+  killTerrainFindingSystem(): void {}
 }
 
 // building.ts imports Terrain type-only, so this value import is not a runtime cycle.
@@ -230,6 +258,46 @@ export class Terrain {
     building.setTerrain(this);
     this.building = building;
     building.init();
+  }
+
+  /**
+   * game/terrain.cpp:1473 Terrain::createTerrainFindingSystem — explores from
+   * this tile, expanding across the four direct neighbours whose getID()
+   * equals this tile's (terrainfindingsystem.cpp:86 getCosts). The start tile
+   * is always reached: explore() seeds it at cost 0 before the id check ever
+   * runs (coreengine/pathfindingsystem.cpp:54), so a lone meteor still yields
+   * itself. Matching on getID() rather than the raw terrain id mirrors the
+   * C++, where a building's id shadows the terrain underneath.
+   */
+  createTerrainFindingSystem(): TerrainFindingSystem {
+    const id = this.getID();
+    const width = this.map.getMapWidth();
+    const height = this.map.getMapHeight();
+    const reached = new Set<number>();
+    const queue: QPoint[] = [{ x: this.x, y: this.y }];
+    reached.add(this.x + this.y * width);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const x = current.x + dx;
+        const y = current.y + dy;
+        if (!this.map.onMap(x, y)) continue;
+        const index = x + y * width;
+        if (reached.has(index)) continue;
+        if (this.map.getTerrain(x, y).getID() !== id) continue;
+        reached.add(index);
+        queue.push({ x, y });
+      }
+    }
+    // Emit in the C++ result order (pathfindingsystem.cpp:225 scans x outer,
+    // y inner) so scripts iterate the same sequence the desktop client sees.
+    const points: QPoint[] = [];
+    for (let x = 0; x < width; x++) {
+      for (let y = 0; y < height; y++) {
+        if (reached.has(x + y * width)) points.push({ x, y });
+      }
+    }
+    return new TerrainFindingSystem(points);
   }
 
   getHp(): number { return this.hp; }

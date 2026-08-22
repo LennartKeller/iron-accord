@@ -572,13 +572,22 @@ export class Unit {
     if (!this.map.onMap(this.x, this.y)) return false;
 
     if (!player.getFieldVisible(this.x, this.y)) return true;
-    if (this.isStatusStealthed()) return true;
 
-    if (this.useTerrainHide() && this.map.getTerrain(this.x, this.y).getVisionHide(player)) {
-      // Concealing terrain still gives away a unit to an adjacent observer.
-      const adjacent = player.units.some(other =>
-        Math.abs(other.x - this.x) + Math.abs(other.y - this.y) <= 1);
-      return !adjacent;
+    // game/unit.cpp:3599 — status stealth (dived sub, stealthed bomber) and
+    // terrain hide share one escape hatch: an observer on the adjacent ring
+    // reveals the unit either way. Without it a dived submarine could never
+    // be depth-charged by the cruiser standing right next to it.
+    if (this.isStatusStealthed()
+        || (this.useTerrainHide() && this.map.getTerrain(this.x, this.y).getVisionHide(player))) {
+      // game/unit.cpp:3603 — getSpCircle(1, 1): the four tiles at manhattan
+      // distance 1. Any unit there that is Alliance_Friend to the checking
+      // player reveals us — allies count, not just the player's own units.
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        if (!this.map.onMap(this.x + dx, this.y + dy)) continue;
+        const observer = this.map.getTerrain(this.x + dx, this.y + dy).getUnit();
+        if (observer && player.isAlly(observer.getOwner())) return false;
+      }
+      return true;
     }
     return false;
   }

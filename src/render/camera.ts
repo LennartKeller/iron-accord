@@ -9,7 +9,14 @@ export class Camera {
   minScale = 1;
   maxScale = 12;
 
-  constructor(private viewport: Viewport) {}
+  // Written out rather than declared as a constructor parameter property:
+  // plain `node` type stripping erases the annotation but cannot generate the
+  // assignment it implies, so the field would silently stay undefined.
+  private viewport: Viewport;
+
+  constructor(viewport: Viewport) {
+    this.viewport = viewport;
+  }
 
   setViewport(viewport: Viewport): void { this.viewport = viewport; }
 

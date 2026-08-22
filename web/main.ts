@@ -16,7 +16,7 @@ import {
 } from '../src/ai/index.ts';
 import { ValueNetAgent } from '../src/ai/valuenet.web.ts';
 import { defaultConfig, sanitizeConfig, LIMITS, type GameConfig, type SeatController } from '../src/game/config.ts';
-import { GameEnums, type AnimationRunner, type Unit } from '../src/host/index.ts';
+import { GameEnums, type AnimationRunner, type Mulberry32, type Unit } from '../src/host/index.ts';
 import type { ScriptRegistry } from '../src/scripts/types.ts';
 
 interface IndexEntry {
@@ -57,6 +57,8 @@ renderer.onSpriteReady = () => requestRender();
 
 let registry: ScriptRegistry | null = null;
 let animations: AnimationRunner | null = null;
+/** The script RNG the whole battle draws luck from; set alongside `registry`. */
+let rng: Mulberry32 | null = null;
 let game: Game | null = null;
 let scene: Scene | null = null;
 let env: GameEnvironment | null = null;
@@ -765,7 +767,11 @@ async function loadScene(id: string): Promise<void> {
       scene!.players.length, scene!.players.map(p => p.army), scene!.players[0]?.funds ?? 0);
     game = new Game(gameMapFromScene(scene!, registry, config), registry, animations,
       { victoryRules: config.victoryRules });
-    env = new GameEnvironment(game.map, registry, { maxFieldChoices: 8 }, game);
+    // The script RNG must ride along: explore() rewinds it around simulated
+    // battles, and without it the AI's deliberation would consume the luck
+    // stream the real game draws from.
+    env = new GameEnvironment(game.map, registry,
+      { maxFieldChoices: 8, rng: rng ?? undefined }, game);
   } else {
     game = null;
     env = null;
@@ -1182,6 +1188,7 @@ async function main(): Promise<void> {
     const boot = await bootstrapBrowser(asset('scripts.json'));
     registry = boot.registry;
     animations = boot.animations;
+    rng = boot.rng;
     if (boot.report.failed.length) console.warn('scripts failed to load', boot.report.failed);
     console.info(`Commander Wars scripts: ${boot.report.loaded.length} loaded in the browser`);
   } catch (error) {

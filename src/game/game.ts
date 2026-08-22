@@ -138,7 +138,10 @@ export class Game {
       const action = this.buildAction(actionID, unit, destination);
       let allowed = false;
       try { allowed = script.canBePerformed(action, this.map) === true; }
-      catch { allowed = false; }
+      // Still treated as not-allowed, but never silently: a throw here would
+      // otherwise delete the action from the menu and the AI's enumeration
+      // with no signal at all.
+      catch (error) { console.warn(`canBePerformed ${actionID} failed`, error); }
       if (!allowed) continue;
       options.push({
         id: actionID,

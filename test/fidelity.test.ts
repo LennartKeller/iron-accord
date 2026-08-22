@@ -179,6 +179,25 @@ describe('vision', () => {
     sub.setHidden(true);
     expect(bomber.isAttackable(sub, true)).toBe(false);
   });
+
+  it('reveals a dived submarine to an adjacent unit', () => {
+    // game/unit.cpp:3599 — the adjacency escape applies to status stealth too,
+    // so the sub is revealed and scripts/general/unit.js canAttackStealthedUnit
+    // lets a naval direct attacker depth-charge it. Without this, a dived sub
+    // parked next to a cruiser is permanently invulnerable.
+    const sub = map.addUnit('SUBMARINE', map.getPlayer(1)!, 0, 0);
+    const cruiser = map.addUnit('CRUISER', map.getPlayer(0)!, 1, 0);
+    sub.setHidden(true);
+    map.vision.update();
+    expect(sub.isStealthed(map.getPlayer(0)!)).toBe(false);
+    expect(cruiser.isAttackable(sub)).toBe(true);
+
+    // A bomber next to the sub also reveals it, but is still refused by
+    // canAttackStealthedUnit — air cannot hit a dived naval unit.
+    const bomber = map.addUnit('BOMBER', map.getPlayer(0)!, 0, 1);
+    map.vision.update();
+    expect(bomber.isAttackable(sub)).toBe(false);
+  });
 });
 
 describe('unit type vocabulary', () => {

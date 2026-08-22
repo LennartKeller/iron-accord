@@ -38,11 +38,17 @@ export class PointerControls {
   private readonly longPressMs: number;
   private disposed = false;
 
-  constructor(
-    private readonly element: HTMLElement,
-    private readonly camera: Camera,
-    private readonly options: PointerControlOptions = {},
-  ) {
+  // Written out rather than declared as constructor parameter properties:
+  // plain `node` type stripping erases the annotations but cannot generate the
+  // assignments they imply, so the fields would silently stay undefined.
+  private readonly element: HTMLElement;
+  private readonly camera: Camera;
+  private readonly options: PointerControlOptions;
+
+  constructor(element: HTMLElement, camera: Camera, options: PointerControlOptions = {}) {
+    this.element = element;
+    this.camera = camera;
+    this.options = options;
     this.dragThreshold = options.dragThreshold ?? 8;
     this.longPressMs = options.longPressMs ?? 500;
 

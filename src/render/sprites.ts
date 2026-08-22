@@ -36,11 +36,22 @@ export class SpriteStore {
   private readonly recolored = new Map<string, Promise<LoadedSprite>>();
   private readonly tables = new Map<string, Promise<ImageData>>();
 
+  // Written out rather than declared as constructor parameter properties:
+  // plain `node` type stripping erases the annotations but cannot generate the
+  // assignments they imply, so the fields would silently stay undefined.
+  private readonly spriteUrl: (id: string) => string;
+  private readonly tableUrl: (name: string) => string;
+  private manifest: SpriteManifest;
+
   constructor(
-    private readonly spriteUrl: (id: string) => string,
-    private readonly tableUrl: (name: string) => string,
-    private manifest: SpriteManifest = {},
-  ) {}
+    spriteUrl: (id: string) => string,
+    tableUrl: (name: string) => string,
+    manifest: SpriteManifest = {},
+  ) {
+    this.spriteUrl = spriteUrl;
+    this.tableUrl = tableUrl;
+    this.manifest = manifest;
+  }
 
   setManifest(manifest: SpriteManifest): void { this.manifest = manifest; }
 
