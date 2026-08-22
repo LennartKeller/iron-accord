@@ -8,6 +8,12 @@
  *   npx vite-node tools/bench-valuenet.ts
  *   MAPS=all BUDGET_MS=800 npx vite-node tools/bench-valuenet.ts
  *
+ * Two models can be compared directly, which is the only way to settle a
+ * question like wdl-versus-scalar: held-out rank correlation says which orders
+ * stored positions better, and that is not the same claim as winning games.
+ *
+ *   MODEL_A=a/value.onnx MODEL_B=b/value.onnx npx vite-node tools/bench-valuenet.ts
+ *
  * The mirror check runs first: identical agents from both seats must come out at
  * exactly 0.500, or the harness is biased and every number below it is noise.
  */
@@ -27,10 +33,18 @@ import type { Evaluator } from '../src/ai/evaluator.ts';
 
 const { registry, animations, rng } = bootstrap();
 const budget = Number(process.env.BUDGET_MS ?? 250);
-const modelPath = process.env.MODEL ?? 'models/value.onnx';
+/**
+ * NODES makes a comparison reproducible; BUDGET_MS makes it depend on the load.
+ * Prefer NODES whenever two models are being ranked against each other.
+ */
+const nodeBudget = Number(process.env.NODES ?? 0);
+const modelPath = process.env.MODEL_A ?? process.env.MODEL ?? 'models/value.onnx';
 const evaluator = await loadValueNet(modelPath);
+/** Optional second model, for a head-to-head between two trained nets. */
+const modelPathB = process.env.MODEL_B ?? '';
+const evaluatorB = modelPathB ? await loadValueNet(modelPathB) : null;
 
-type Side = 'net' | 'budgeted' | 'plain' | 'greedy';
+type Side = 'net' | 'budgeted' | 'netB' | 'budgetedB' | 'plain' | 'greedy';
 /**
  * Big enough to cover a whole beam layer natively, which 8 was not.
  *
@@ -45,14 +59,20 @@ type Side = 'net' | 'budgeted' | 'plain' | 'greedy';
  */
 const maxPerLayer = Number(process.env.MAX_PER_LAYER ?? 36);
 const budgeted = new BudgetedValueNet(evaluator, new HeuristicEvaluator(), maxPerLayer);
+const budgetedB = evaluatorB
+  ? new BudgetedValueNet(evaluatorB, new HeuristicEvaluator(), maxPerLayer) : null;
+
+function evaluatorFor(side: Side): Evaluator<unknown> | undefined {
+  if (side === 'net') return evaluator as Evaluator<unknown>;
+  if (side === 'budgeted') return budgeted as Evaluator<unknown>;
+  if (side === 'netB') return evaluatorB as Evaluator<unknown>;
+  if (side === 'budgetedB') return budgetedB as Evaluator<unknown>;
+  return undefined;  // 'plain' searches on the hand-priced score.
+}
 
 function agentFor(side: Side) {
   if (side === 'greedy') return new HeuristicAgent();
-  return new PlannerAgent({
-    timeBudgetMs: budget,
-    evaluator: side === 'net' ? (evaluator as Evaluator<unknown>)
-      : side === 'budgeted' ? (budgeted as Evaluator<unknown>) : undefined,
-  });
+  return new PlannerAgent({ timeBudgetMs: budget, nodeBudget, evaluator: evaluatorFor(side) });
 }
 
 async function duel(file: string, seed: number, fog: number, left: Side, right: Side, leftSeat: number) {
@@ -60,7 +80,9 @@ async function duel(file: string, seed: number, fog: number, left: Side, right: 
   map.getGameRules().setFogMode(fog);
   const game = new Game(map, registry, animations);
   map.vision.update();
-  const env = new GameEnvironment(map, registry, { maxDays: 30, maxFieldChoices: 6, rng, seed }, game);
+  // 60 to match the day cap the training labels were generated at; at 30 a win
+  // the net was taught to expect on day 45 scores here as a draw.
+  const env = new GameEnvironment(map, registry, { maxDays: 60, maxFieldChoices: 6, rng, seed }, game);
   // The script RNG is process-wide; without a reset per match the previous
   // match's combat luck carries into this one.
   env.reset(seed);
@@ -72,32 +94,77 @@ async function duel(file: string, seed: number, fog: number, left: Side, right: 
   return { winner: result.winner, leftSeat, ms: Date.now() - started };
 }
 
+/**
+ * Fog modes are reported separately as well as pooled.
+ *
+ * The encoder is current-vision-only and the net never sees `Belief`, so under
+ * fog the value of an observation is not the value of the position, and a
+ * maximiser is rewarded for moving enemies out of sight — it raises the encoded
+ * score without improving anything. That failure would be invisible in a pooled
+ * number: a strong fog-off result can carry a broken fog-on one. If a model
+ * gains with search in fog off but not in fog of war, the missing piece is
+ * belief channels, not more training.
+ */
 async function series(label: string, left: Side, right: Side, maps: string[], fogs: number[]) {
-  let wins = 0, losses = 0, draws = 0, ms = 0;
+  const tally = new Map<number, { wins: number; losses: number; draws: number; ms: number }>();
+  for (const fog of fogs) tally.set(fog, { wins: 0, losses: 0, draws: 0, ms: 0 });
+
   for (const file of maps) {
     for (const fog of fogs) {
       for (const seat of [0, 1]) {
         const r = await duel(file, 1, fog, left, right, seat);
-        ms += r.ms;
-        if (r.winner === null) draws++;
-        else if (r.winner === seat) wins++;
-        else losses++;
+        const t = tally.get(fog)!;
+        t.ms += r.ms;
+        if (r.winner === null) t.draws++;
+        else if (r.winner === seat) t.wins++;
+        else t.losses++;
       }
     }
   }
+
+  let wins = 0, losses = 0, draws = 0, ms = 0;
+  for (const t of tally.values()) {
+    wins += t.wins; losses += t.losses; draws += t.draws; ms += t.ms;
+  }
   const played = wins + losses + draws;
   const rate = (wins + draws / 2) / played;
+  const split = fogs.map(fog => {
+    const t = tally.get(fog)!;
+    const n = t.wins + t.losses + t.draws;
+    const name = fog === GameEnums.Fog_Off ? 'off' : 'war';
+    return `${name} ${((t.wins + t.draws / 2) / n).toFixed(3)}`;
+  }).join('  ');
   console.log(`${label.padEnd(26)} ${wins}W ${losses}L ${draws}D  rate ${rate.toFixed(3)}  ` +
-    `n=${played}  ${(ms / played / 1000).toFixed(1)}s/match`);
+    `[fog ${split}]  n=${played}  ${(ms / played / 1000).toFixed(1)}s/match`);
   return rate;
 }
 
-const maps = process.env.MAPS === 'all'
-  ? [...TRAIN_MAPS, ...VALIDATION_MAPS]
-  : VALIDATION_MAPS;
+/**
+ * MAPS_FILE points at a JSON map list, which is how a comparison gets enough
+ * held-out boards to mean anything.
+ *
+ * Seeds barely vary a match, so significance comes from maps and nothing else:
+ * six maps is 24 matches per series and a standard error near 0.1, which cannot
+ * separate two nets that differ by less than that. A net trained on the
+ * benchmark suite has never seen the wide training pool, so that list doubles
+ * as a large held-out set. MAP_LIMIT takes an evenly spaced subset, because
+ * every extra map costs four matches in every series.
+ */
+const mapsFile = process.env.MAPS_FILE ?? '';
+let maps: string[];
+if (mapsFile) {
+  const all: string[] = JSON.parse(fs.readFileSync(mapsFile, 'utf8'));
+  const limit = Number(process.env.MAP_LIMIT ?? 0) || all.length;
+  const stride = Math.max(1, Math.floor(all.length / limit));
+  maps = all.filter((_, i) => i % stride === 0).slice(0, limit);
+} else {
+  maps = process.env.MAPS === 'all' ? [...TRAIN_MAPS, ...VALIDATION_MAPS] : VALIDATION_MAPS;
+}
 const fogs = [GameEnums.Fog_Off, GameEnums.Fog_OfWar];
 
-console.log(`model ${modelPath}, budget ${budget}ms, ${maps.length} maps, both fog modes\n`);
+console.log(`model A ${modelPath}${modelPathB ? `\nmodel B ${modelPathB}` : ''}`);
+console.log(`${nodeBudget > 0 ? `${nodeBudget} nodes/turn (reproducible)` : `${budget}ms/turn (load-dependent)`}` +
+  `, maxPerLayer ${maxPerLayer}, ${maps.length} maps, both fog modes\n`);
 
 // Trap 3 from the handoff: if a mirror duel is not exactly 0.500 the harness is
 // biased and nothing below it means anything.
@@ -108,6 +175,10 @@ if (Math.abs(mirror - 0.5) > 1e-9) {
 }
 
 console.log('');
-await series('valuenet planner v greedy', 'net', 'greedy', maps, fogs);
-await series('budgeted net v greedy', 'budgeted', 'greedy', maps, fogs);
+await series('A: net v greedy', 'budgeted', 'greedy', maps, fogs);
+if (evaluatorB) {
+  await series('B: net v greedy', 'budgetedB', 'greedy', maps, fogs);
+  // The head-to-head. Rate is from A's point of view: above 0.500 means A wins.
+  await series('A v B (head to head)', 'budgeted', 'budgetedB', maps, fogs);
+}
 await series('plain planner v greedy', 'plain', 'greedy', maps, fogs);

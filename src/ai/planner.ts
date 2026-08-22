@@ -16,6 +16,20 @@ export interface PlannerOptions {
   maxPlanLength: number;
   /** Wall-clock budget per turn, in milliseconds. */
   timeBudgetMs: number;
+  /**
+   * Positions the evaluator may score per turn. 0 leaves the clock in charge.
+   *
+   * A wall-clock budget makes a match depend on how busy the machine was: the
+   * same model, maps, seeds and seats scored 0.672 in a duel that shared the box
+   * with a training run and 0.727 in one that did not, because the search fit
+   * more nodes into 250 ms. `env.reset(seed)` cannot fix that — the seed pins
+   * combat luck, not how much thinking fits in a millisecond.
+   *
+   * Counting scored positions instead makes a comparison reproducible, which is
+   * what a benchmark needs. The shipped agent still wants the clock, because a
+   * turn has to end whatever the hardware is doing.
+   */
+  nodeBudget: number;
   position: PositionWeights;
   /** How positions are scored. Swap in a network without touching the search. */
   evaluator?: Evaluator<unknown>;
@@ -26,6 +40,7 @@ export const DEFAULT_PLANNER_OPTIONS: PlannerOptions = {
   branching: 6,
   maxPlanLength: 24,
   timeBudgetMs: 400,
+  nodeBudget: 0,
   position: DEFAULT_POSITION_WEIGHTS,
 };
 
@@ -125,6 +140,10 @@ export class PlannerAgent implements Agent {
    */
   private async plan(env: GameEnvironment, legal: ActionDescriptor[]): Promise<ActionDescriptor[]> {
     const deadline = Date.now() + this.options.timeBudgetMs;
+    // Whichever limit is in force, `spent` is what the search has actually used.
+    const nodeBudget = this.options.nodeBudget;
+    let scored = 0;
+    const exhausted = () => nodeBudget > 0 ? scored >= nodeBudget : Date.now() > deadline;
     const self = env.game.currentPlayer;
     const seat = self.getPlayerID();
     const belief = this.beliefFor(self);
@@ -135,12 +154,13 @@ export class PlannerAgent implements Agent {
     // The position as it stands, so a turn that does nothing has a price.
     const opening = this.evaluator.capture(env.game, self, belief);
     best.score = (await this.evaluator.score([opening]))[0];
+    scored += 1;
 
     for (let depth = 0; depth < this.options.maxPlanLength; depth++) {
       const pending: Array<{ actions: ActionDescriptor[]; capture: unknown }> = [];
 
       for (const plan of beam) {
-        if (Date.now() > deadline) break;
+        if (exhausted()) break;
 
         env.explore(() => {
           for (const action of plan.actions) applyAction(env.game, action);
@@ -164,12 +184,13 @@ export class PlannerAgent implements Agent {
 
       if (pending.length === 0) break;
       const scores = await this.evaluator.score(pending.map(entry => entry.capture));
+      scored += pending.length;
       const next: Plan[] = pending.map((entry, i) => ({ actions: entry.actions, score: scores[i] }));
 
       next.sort((a, b) => b.score - a.score);
       if (next[0].score > best.score) best = next[0];
       beam = next.slice(0, this.options.beamWidth);
-      if (Date.now() > deadline) break;
+      if (exhausted()) break;
     }
 
     return best.actions;

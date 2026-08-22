@@ -61,6 +61,17 @@ def parse_args():
                                         else 'mps' if torch.backends.mps.is_available()
                                         else 'cpu'))
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--log-every', type=int, default=100,
+                   help='steps between training-loss points sent to W&B. Epochs '
+                        'here are ~12k steps, so epoch-boundary logging alone '
+                        'leaves a run looking dead for ten minutes at a time.')
+    p.add_argument('--val-per-shard', type=int, default=1024,
+                   help='cap on validation rows taken per shard; 0 uses all. '
+                        'The split is by map and there are hundreds of shards, '
+                        'so a per-shard cap keeps every map represented while '
+                        'cutting an eval pass that is otherwise 38%% of the '
+                        'data -- and twice that under --head wdl, which runs '
+                        'the scalar ablation over the same batches.')
     p.add_argument('--wandb', default='iron-accord-value',
                    help='W&B project; empty string disables logging')
     p.add_argument('--run-name', default=None)
@@ -90,7 +101,7 @@ class Shards:
             self.entries.append(entry)
             self.total += n
 
-    def batches(self, batch_size, rng, augment):
+    def batches(self, batch_size, rng, augment, max_per_shard=0):
         """
         Yields (planes, scalars, labels, baseline), interleaved across maps.
 
@@ -105,8 +116,12 @@ class Shards:
         rows_by_shard = []
         for si, e in enumerate(self.entries):
             rows = rng.permutation(e['n'])
+            # Sampled after the shuffle, so a capped pass still sees a random
+            # slice of the shard rather than whatever the file happens to open with.
+            if max_per_shard:
+                rows = rows[:max_per_shard]
             rows_by_shard.append(rows)
-            for start in range(0, e['n'], batch_size):
+            for start in range(0, len(rows), batch_size):
                 plan.append((si, start))
         rng.shuffle(plan)
 
@@ -273,7 +288,8 @@ def evaluate(model, shards, args, rng):
     model.eval()
     preds, labels, bases, logits, blank = [], [], [], [], []
     shard_ids = []
-    for planes, scalars, y, base, si in shards.batches(args.batch, rng, augment=0):
+    for planes, scalars, y, base, si in shards.batches(
+            args.batch, rng, augment=0, max_per_shard=args.val_per_shard):
         planes = planes.to(args.device)
         scalars = scalars.to(args.device)
         out = model(planes, scalars)
@@ -385,9 +401,12 @@ def main():
             })
         # The heuristic is the thing to beat, and it does not change between
         # epochs — logging it as a line makes every chart self-explanatory.
+        wandb.define_metric('step')
+        wandb.define_metric('*', step_metric='step')
         wandb.define_metric('val/mse', summary='min')
         wandb.define_metric('val/ce', summary='min')
         wandb.define_metric('val/rank', summary='max')
+        wandb.define_metric('val/rank_bymap', summary='max')
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     steps = max(1, math.ceil(train.total / args.batch)) * args.epochs
@@ -400,6 +419,7 @@ def main():
         class_weights = torch.tensor([1.0, args.draw_weight, 1.0], device=args.device)
 
     best = None
+    best_rank = None
     step = 0
     for epoch in range(args.epochs):
         started = time.time()
@@ -426,6 +446,9 @@ def main():
             step += 1
             running += float(loss.detach()) * len(y)
             seen += len(y)
+            if run is not None and step % args.log_every == 0:
+                run.log({'step': step, 'train/loss_running': running / max(seen, 1),
+                         'lr': sched.get_last_lr()[0]}, step=step)
 
         stats = evaluate(model, val, args, rng)
         line = f"epoch {epoch+1:2d}  train {running/max(seen,1):.4f}  "
@@ -443,6 +466,7 @@ def main():
 
         if run is not None:
             payload = {
+                'step': step,
                 'epoch': epoch + 1,
                 'train/loss': running / max(seen, 1),
                 'val/mse': stats['mse'],
@@ -468,21 +492,33 @@ def main():
                     'val/blank_ce': stats['blank_ce'],
                     'val/trunk_share': stats['trunk_share'],
                 })
-            run.log(payload, step=epoch + 1)
+            run.log(payload, step=step)
 
-        # Select on the loss the head was trained against: cross-entropy is a
-        # proper scoring rule for a distribution, MSE of the collapsed scalar is
-        # not -- it would happily prefer a net that is confidently wrong.
+        # Three checkpoints, because no single validation metric here predicts
+        # playing strength. Cross-entropy and rank disagree badly -- on the
+        # merged dataset CE was lowest at epoch 1 while rank kept climbing to
+        # epoch 6, so selecting on CE alone threw away the better player -- and
+        # a head-to-head between two heads once inverted both of them. Keep the
+        # candidates cheap (2 MB each) and let `bench-valuenet.ts` decide.
+        os.makedirs(args.out, exist_ok=True)
+        payload = {'args': vars(args),
+                   'manifest': {k: manifest[k] for k in
+                                ('channels', 'terrainCount', 'unitCount',
+                                 'buildingCount', 'derivedCount', 'scalarNames')}}
+
+        def save(name, why):
+            torch.save({**payload, 'model': model.state_dict(),
+                        'stats': stats, 'selected_by': why},
+                       os.path.join(args.out, name))
+
         key = 'ce' if args.head == 'wdl' else 'mse'
+        save('value-last.pt', 'final epoch')
+        if best_rank is None or stats['net_rank_bymap'] > best_rank['net_rank_bymap']:
+            best_rank = stats
+            save('value-rank.pt', 'best val rank per map')
         if best is None or stats[key] < best[key]:
             best = stats
-            os.makedirs(args.out, exist_ok=True)
-            torch.save({'model': model.state_dict(), 'args': vars(args),
-                        'manifest': {k: manifest[k] for k in
-                                     ('channels', 'terrainCount', 'unitCount',
-                                      'buildingCount', 'derivedCount', 'scalarNames')},
-                        'stats': stats},
-                       os.path.join(args.out, 'value.pt'))
+            save('value.pt', f'best val {key}')
 
     print()
     if args.head == 'wdl':
@@ -517,6 +553,9 @@ def main():
             print(f"scalars ablated: ce {best['blank_ce']:.4f} vs {best['ce']:.4f} -- "
                   f"{share*100:.0f}% of the edge over the prior is the trunk"
                   f"{'  (SHORTCUT: the scalars are doing the work)' if share < 0.5 else ''}")
+    if best_rank is not None and best_rank['net_rank_bymap'] > best['net_rank_bymap'] + 1e-9:
+        print(f"NOTE: value.pt ranks {best['net_rank_bymap']:.3f} but value-rank.pt "
+              f"ranks {best_rank['net_rank_bymap']:.3f} -- play them, do not assume")
     print(f"ranking per map over {best['maps_scored']} maps: net {best['net_rank_bymap']:.3f}, "
           f"heuristic {best['baseline_rank_bymap']:.3f} "
           f"-> {'net wins' if best['net_rank_bymap'] > best['baseline_rank_bymap'] else 'HEURISTIC STILL WINS'}")

@@ -35,6 +35,89 @@ hand-priced position evaluation with a learned value function is the job.
 
 ### Agent strength, honestly
 
+**Settled: the value net works, and the head choice is most of it.** On 32 maps
+from the wide pool that no net had trained on, 128 matches per series, both fog
+modes, both seats, 250 ms, `maxPerLayer 36`:
+
+| agent | vs `HeuristicAgent` |
+|---|---|
+| mirror (greedy v greedy) | 0.500 — harness unbiased |
+| plain planner, hand-priced | **0.445** |
+| planner + scalar-head net | **0.488** |
+| planner + **WDL**-head net | **0.621** |
+
+3.4σ over greedy (p ≈ 0.0007), and WDL beats scalar head-to-head 0.609 at 3.0σ.
+The plain planner reproducing 0.445 against the 0.44 recorded below, on a map
+pool it was never measured on, is the check that the rest is real.
+
+**Training data: breadth beat volume, and the benchmark data bought nothing.**
+16 maps held out from every net below, 64 matches per series, 250 ms:
+
+| net | training data | rank/map | vs greedy |
+|---|---|---|---|
+| plain planner | — | — | 0.453 / 0.461 |
+| `ab-wdl` | 3.12M positions, 12 benchmark maps | 0.393 | 0.523 |
+| `merged` | 4.19M positions, 67 maps | **0.436** | 0.523 |
+| `wide` | **1.07M positions, 55 maps** | 0.402 | **0.672 / 0.727** |
+
+`wide` trains on a quarter of `merged`'s positions and is not worse anywhere;
+the 3.12M benchmark positions added nothing. They come from 12 fast-resolving
+maps whose games barely vary, so they carry little information while outvoting
+the wide data 3:1 in the loss. Generate more wide-pool games rather than more
+games; `wide` overfits by epoch 3 on 1.07M positions, so it is data-limited on
+the axis that matters.
+
+**Two measurement traps found the hard way.**
+
+*Indirect comparison inflates differences.* Via greedy, `wide` looked +0.149
+over `ab` and +0.149/+0.204 over `merged`. Played head-to-head those became
++0.055 and +0.023 — a tie. Two strong searching agents neutralise each other
+and draw more, while greedy is weaker and more exploitable, so a common-opponent
+gap is not a difference in strength. Report head-to-head before claiming one net
+beats another.
+
+*The benchmark is not deterministic.* `PlannerAgent` budgets by wall clock, so
+search depth moves with machine load: `wide` scored 0.672 in a duel sharing the
+box with a training run and 0.727 in one that did not — same model, maps, seeds
+and seats. `env.reset(seed)` fixes combat luck, not how many nodes fit in 250 ms.
+Run benchmarks unloaded, and prefer a node budget when comparing models.
+
+**The stored-position metrics ranked these backwards.** Scalar won every offline
+number — val mse 0.4367 vs 0.4640, per-map rank 0.424 vs 0.393 — and loses in
+play by three sigma. Pooled rank correlation rewards separating clearly-won from
+clearly-lost boards; a beam search separates near-equal siblings inside one
+layer, which is exactly where the draw class carries the signal a scalar head
+collapses to zero.
+
+It has now mis-ordered three separate decisions: which head (scalar won on
+paper, lost 3σ in play), which dataset (`merged` has the best rank of any net
+trained and ties for worst in play), and which checkpoint (on `merged`,
+cross-entropy bottomed at epoch 1 while rank climbed to epoch 6, so selecting on
+CE saved the weaker player — `train_value.py` now writes `value.pt`,
+`value-rank.pt` and `value-last.pt` and expects you to play them).
+**Do not pick a head, a dataset, or a checkpoint on a validation metric. Play
+the matches.**
+
+**Phase 4 passes: the time-scaling curve inverted.** 16 held-out maps, 64
+matches per series, identical maps/seats/fog at both budgets, so the only
+variable is the evaluator:
+
+| budget | WDL net | plain planner |
+|---|---|---|
+| 150 ms | 0.648 | 0.516 |
+| 800 ms | **0.680** | **0.406** |
+| Δ | **+0.032** | **−0.110** |
+
+The hand-priced planner still degrades with more thinking time. The net planner
+does not. Note the plain planner's 0.406 at 800 ms against the 0.406 recorded
+below, measured on a different map pool months earlier — the pathology
+reproduces exactly, which is what makes the contrast trustworthy.
+
+The honest reading: +0.032 alone is ~0.5σ, so the claim is **"more search no
+longer hurts"**, not "more search helps a lot". That was the gate, and it is
+also the precondition for expert iteration — a search that degrades with depth
+cannot be used to improve a policy, because you would be distilling worse play.
+
 - `PlannerAgent` vs `HeuristicAgent`, full suite: **~0.44**. It loses.
 - More search makes it worse: **0.484 at 150 ms → 0.406 at 800 ms**.
 - Weight tuning has failed **twice**, and the second attempt fixed every

@@ -61,6 +61,15 @@ const inFile = arg('in', 'data/pilot.jsonl.gz');
  * meteors; the games are already recorded, so they get filtered here.
  */
 const onlyFile = arg('only', '');
+/**
+ * Where this process writes its manifest.
+ *
+ * `extract-parallel.ts` runs several of these over disjoint map sets into one
+ * output directory. Shard files already carry the map slug so they never
+ * collide, but the manifest would, so each part writes its own and the
+ * coordinator merges them.
+ */
+const manifestName = arg('manifestName', 'manifest.json');
 const only: Set<string> | null = onlyFile
   ? new Set(JSON.parse(fs.readFileSync(onlyFile, 'utf8')) as string[])
   : null;
@@ -134,15 +143,46 @@ interface Bucket {
   planes: Uint8Array;
   scalars: Float32Array;
   labels: Float32Array;
+  /**
+   * The action actually taken, as three parallel arrays: which action id, and
+   * the tile it happened on, flattened to y * width + x.
+   *
+   * This is the supervision a policy head needs, and it is why extraction has
+   * to write it now rather than later: replays store actions, so re-deriving
+   * these means replaying every game again. `-1` marks an action the vocabulary
+   * cannot name, which the trainer masks out of the policy loss rather than
+   * learning a wrong target for.
+   */
+  actionType: Int16Array;
+  actionTile: Int32Array;
   baselines: Float32Array;
   games: Uint32Array;
   plies: Uint32Array;
+  /**
+   * Games this map has contributed, used to number them.
+   *
+   * Per map, not per process: `extract-parallel.ts` splits the map list across
+   * processes, so a process-wide counter numbers the same game differently
+   * depending on how many workers ran, and the shard bytes stop being a
+   * function of the input. A map's positions all come from one process, so
+   * counting here is both partition-independent and the only scope where a
+   * game index means anything — every consumer groups within a shard.
+   */
+  gameSeq: number;
   /** Write cursor into `planes`; the rest index by `count`. */
   offset: number;
   count: number;
   shard: number;
   written: number;
 }
+
+/**
+ * The policy head's output vocabulary: every ACTION_* id, plus one slot for
+ * ending the turn, which is a real choice the search makes but not a script.
+ */
+const actionVocab = vocabulary(registry).actions;
+const actionIndex = new Map(actionVocab.map((id, i) => [id, i]));
+const endTurnIndex = actionVocab.length;
 
 const buckets = new Map<string, Bucket>();
 const encoders = new Map<string, ObservationEncoder>();
@@ -168,8 +208,11 @@ function bucketFor(replay: Replay, width: number, height: number): Bucket {
       planes: new Uint8Array(shardSize * (3 + derivedCount) * width * height),
       scalars: new Float32Array(shardSize * scalarCount),
       labels: new Float32Array(shardSize),
+      actionType: new Int16Array(shardSize),
+      actionTile: new Int32Array(shardSize),
       baselines: new Float32Array(shardSize),
       games: new Uint32Array(shardSize),
+      gameSeq: 0,
       plies: new Uint32Array(shardSize),
       offset: 0, count: 0, shard: 0, written: 0,
     };
@@ -192,6 +235,8 @@ function flush(bucket: Bucket): void {
   fs.writeFileSync(`${stem}.planes.u8`, Buffer.from(bucket.planes.buffer, 0, bucket.offset));
   fs.writeFileSync(`${stem}.scalars.f32`, Buffer.from(bucket.scalars.buffer, 0, bucket.count * scalarCount * 4));
   fs.writeFileSync(`${stem}.labels.f32`, Buffer.from(bucket.labels.buffer, 0, bucket.count * 4));
+  fs.writeFileSync(`${stem}.actiontype.i16`, Buffer.from(bucket.actionType.buffer, 0, bucket.count * 2));
+  fs.writeFileSync(`${stem}.actiontile.i32`, Buffer.from(bucket.actionTile.buffer, 0, bucket.count * 4));
   fs.writeFileSync(`${stem}.baseline.f32`, Buffer.from(bucket.baselines.buffer, 0, bucket.count * 4));
   fs.writeFileSync(`${stem}.games.u32`, Buffer.from(bucket.games.buffer, 0, bucket.count * 4));
   fs.writeFileSync(`${stem}.plies.u32`, Buffer.from(bucket.plies.buffer, 0, bucket.count * 4));
@@ -336,6 +381,7 @@ for await (const line of lines) {
   }
 
   const bucket = bucketFor(replay, map.width, map.height);
+  const gameIndex = bucket.gameSeq++;
   let refused = 0;
 
   // One Belief per seat, kept across turns and refreshed at each turn start —
@@ -373,7 +419,25 @@ for await (const line of lines) {
       bucket.baselines[bucket.count] = baseline
         ? evaluator.score([evaluator.capture(game, player, beliefs.get(acting)!)])[0]
         : 0;
-      bucket.games[bucket.count] = games;
+      // The action this position led to, which is the policy target. `to` for a
+      // unit action, `at` for production, and the whole board for endTurn --
+      // encoded as tile -1 so the trainer can treat it as a board-wide choice
+      // rather than pinning it to an arbitrary square.
+      const taken = replay.actions[i].action;
+      let type = -1;
+      let tile = -1;
+      if (taken.kind === 'unit') {
+        type = actionIndex.get(taken.actionId) ?? -1;
+        tile = taken.to.y * map.width + taken.to.x;
+      } else if (taken.kind === 'build') {
+        type = actionIndex.get('ACTION_BUILD_UNITS') ?? -1;
+        tile = taken.at.y * map.width + taken.at.x;
+      } else {
+        type = endTurnIndex;
+      }
+      bucket.actionType[bucket.count] = type;
+      bucket.actionTile[bucket.count] = tile;
+      bucket.games[bucket.count] = gameIndex;
       bucket.plies[bucket.count] = i;
       bucket.count++;
       positions++;
@@ -397,15 +461,18 @@ for await (const line of lines) {
 
 for (const bucket of buckets.values()) flush(bucket);
 
-fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify({
+fs.writeFileSync(path.join(outDir, manifestName), JSON.stringify({
   source: inFile,
   perTurn, every, gamma, baseline,
+  actionNames: [...actionVocab, 'END_TURN'],
+  actionCount: actionVocab.length + 1,
   channels: spec?.channels ?? 0,
   channelNames: spec?.channelNames ?? [],
   scalarNames: spec?.scalarNames ?? [],
   terrainCount, unitCount, buildingCount, derivedCount,
   none: 255,
   games, positions,
+  labels: labelTally,
   shards: manifest,
 }, null, 2));
 

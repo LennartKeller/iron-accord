@@ -24,7 +24,7 @@ function derivesFrom(value: unknown, base: unknown): boolean {
  * particular board happens to use.
  */
 export function vocabulary(registry: ScriptRegistry): {
-  terrain: string[]; units: string[]; buildings: string[];
+  terrain: string[]; units: string[]; buildings: string[]; actions: string[];
 } {
   const source = registry as Record<string, unknown>;
   const ids = Object.keys(source)
@@ -35,5 +35,14 @@ export function vocabulary(registry: ScriptRegistry): {
   // Buildings inherit from TERRAIN too, so they are excluded explicitly.
   const terrain = ids.filter(id =>
     derivesFrom(source[id], source.TERRAIN) && !derivesFrom(source[id], source.BUILDING));
-  return { terrain, units, buildings };
+  // Actions are named, not subclassed, so they are matched by prefix rather
+  // than by prototype chain. The list is the policy head's output vocabulary,
+  // so it must come from the registry for the same reason the others do: a
+  // fixed layout across every map, independent of what a board happens to use.
+  // The registry carries UI and CO entries (ACTION_OPTIONS, ACTION_SAVEGAME,
+  // ACTION_ACTIVATE_POWER_CO_0) that no agent can ever choose; they cost one
+  // dead output each, which is cheaper than a hand-maintained allowlist that
+  // silently drops a real action when the submodule adds one.
+  const actions = ids.filter(id => /^ACTION_/.test(id));
+  return { terrain, units, buildings, actions };
 }
