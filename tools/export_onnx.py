@@ -39,10 +39,18 @@ class ExportWrapper(torch.nn.Module):
 
     def forward(self, planes, scalars):
         out = self.model(planes, scalars)
+        policy = None
+        if isinstance(out, tuple):
+            out, policy = out
+            # Log-probabilities, not probabilities: the search compares actions
+            # additively and a log keeps that meaningful, while softmax over
+            # tens of thousands of squares underflows to zero for most of them.
+            policy = torch.log_softmax(policy, dim=1)
         if self.head != 'wdl':
-            return out
+            return (out, policy) if policy is not None else out
         p = torch.softmax(out, dim=1)
-        return p[:, 2] - p[:, 0], p
+        value = p[:, 2] - p[:, 0]
+        return (value, p, policy) if policy is not None else (value, p)
 
 
 def main():
@@ -58,9 +66,13 @@ def main():
 
     # Checkpoints written before the wdl head exist and have no 'head' key.
     head = trained.get('head', 'scalar')
+    # Checkpoints from before the policy head have no action count.
+    actions = ckpt.get('actions', 0) or spec.get('actionCount', 0)
+    if not any(k.startswith('policy_') for k in ckpt['model']):
+        actions = 0
     model = ValueNet(spec, trained['width'], trained['blocks'], trained['input'],
                      scalars=len(spec['scalarNames']), norm=trained.get('norm', 'group'),
-                     head=head)
+                     head=head, actions=actions)
     model.load_state_dict(ckpt['model'])
     model.eval()
     wrapper = ExportWrapper(model, head).eval()
@@ -78,6 +90,10 @@ def main():
     if head == 'wdl':
         output_names.append('wdl')
         dynamic_axes['wdl'] = {0: 'batch'}
+    if actions:
+        output_names.append('policy')
+        # Width varies with the board, so the policy row is dynamic on dim 1 too.
+        dynamic_axes['policy'] = {0: 'batch', 1: 'moves'}
 
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
     torch.onnx.export(
@@ -106,6 +122,8 @@ def main():
 
     meta = {
         'head': head,
+        'actions': actions,
+        'actionNames': spec.get('actionNames', []),
         'planes': planes,
         'derivedCount': spec['derivedCount'],
         'terrainCount': spec['terrainCount'],

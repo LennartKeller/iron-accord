@@ -25,7 +25,8 @@ import { bootstrap } from '../src/game/bootstrap.node.ts';
 import { cwRoot } from '../src/cw/resources.node.ts';
 import { Game } from '../src/game/game.ts';
 import { GameEnvironment, HeuristicAgent, PlannerAgent, HeuristicEvaluator, playMatch } from '../src/ai/index.ts';
-import { BudgetedValueNet } from '../src/ai/onnx-evaluator.ts';
+import { BudgetedValueNet, ValueNetPolicy } from '../src/ai/onnx-evaluator.ts';
+import fsSync from 'node:fs';
 import { loadValueNet } from '../src/ai/valuenet.node.ts';
 import { GameEnums } from '../src/host/index.ts';
 import { TRAIN_MAPS, VALIDATION_MAPS } from './tune-ai.ts';
@@ -38,13 +39,31 @@ const budget = Number(process.env.BUDGET_MS ?? 250);
  * Prefer NODES whenever two models are being ranked against each other.
  */
 const nodeBudget = Number(process.env.NODES ?? 0);
+/** Winner's-curse guard; see PlannerOptions.selectionSigmas. 0 is the old argmax. */
+const selectionSigmas = Number(process.env.SIGMAS ?? 0);
 const modelPath = process.env.MODEL_A ?? process.env.MODEL ?? 'models/value.onnx';
 const evaluator = await loadValueNet(modelPath);
 /** Optional second model, for a head-to-head between two trained nets. */
 const modelPathB = process.env.MODEL_B ?? '';
 const evaluatorB = modelPathB ? await loadValueNet(modelPathB) : null;
 
-type Side = 'net' | 'budgeted' | 'netB' | 'budgetedB' | 'plain' | 'greedy';
+type Side = 'net' | 'budgeted' | 'netB' | 'budgetedB' | 'plain' | 'greedy' | 'policy';
+
+/**
+ * The policy-guided planner: the net picks which moves to search, not just how
+ * to score them.
+ *
+ * Without it `topActions` ranks candidates with `HeuristicAgent.scoreFor`, so
+ * the beam only ever expands moves the hand-priced evaluation liked and a move
+ * it misprices is never searched at all — the value net could only re-rank
+ * someone else's shortlist. Available when MODEL_A was trained with --policy 1.
+ */
+function policyFor(path: string, evaluator: Awaited<ReturnType<typeof loadValueNet>>) {
+  const metaPath = path.replace(/\.onnx$/, '') + '.json';
+  const meta = JSON.parse(fsSync.readFileSync(metaPath, 'utf8'));
+  if (!meta.actions || !meta.actionNames?.length) return null;
+  return new ValueNetPolicy(evaluator, meta.actionNames);
+}
 /**
  * Big enough to cover a whole beam layer natively, which 8 was not.
  *
@@ -59,6 +78,7 @@ type Side = 'net' | 'budgeted' | 'netB' | 'budgetedB' | 'plain' | 'greedy';
  */
 const maxPerLayer = Number(process.env.MAX_PER_LAYER ?? 36);
 const budgeted = new BudgetedValueNet(evaluator, new HeuristicEvaluator(), maxPerLayer);
+const policy = policyFor(modelPath, evaluator);
 const budgetedB = evaluatorB
   ? new BudgetedValueNet(evaluatorB, new HeuristicEvaluator(), maxPerLayer) : null;
 
@@ -72,7 +92,11 @@ function evaluatorFor(side: Side): Evaluator<unknown> | undefined {
 
 function agentFor(side: Side) {
   if (side === 'greedy') return new HeuristicAgent();
-  return new PlannerAgent({ timeBudgetMs: budget, nodeBudget, evaluator: evaluatorFor(side) });
+  return new PlannerAgent({
+    timeBudgetMs: budget, nodeBudget, selectionSigmas,
+    evaluator: evaluatorFor(side === 'policy' ? 'budgeted' : side),
+    policy: side === 'policy' ? policy ?? undefined : undefined,
+  });
 }
 
 async function duel(file: string, seed: number, fog: number, left: Side, right: Side, leftSeat: number) {
@@ -164,7 +188,7 @@ const fogs = [GameEnums.Fog_Off, GameEnums.Fog_OfWar];
 
 console.log(`model A ${modelPath}${modelPathB ? `\nmodel B ${modelPathB}` : ''}`);
 console.log(`${nodeBudget > 0 ? `${nodeBudget} nodes/turn (reproducible)` : `${budget}ms/turn (load-dependent)`}` +
-  `, maxPerLayer ${maxPerLayer}, ${maps.length} maps, both fog modes\n`);
+  `, maxPerLayer ${maxPerLayer}, sigmas ${selectionSigmas}, ${maps.length} maps, both fog modes\n`);
 
 // Trap 3 from the handoff: if a mirror duel is not exactly 0.500 the harness is
 // biased and nothing below it means anything.
@@ -180,5 +204,11 @@ if (evaluatorB) {
   await series('B: net v greedy', 'budgetedB', 'greedy', maps, fogs);
   // The head-to-head. Rate is from A's point of view: above 0.500 means A wins.
   await series('A v B (head to head)', 'budgeted', 'budgetedB', maps, fogs);
+}
+if (policy) {
+  await series('policy+net v greedy', 'policy', 'greedy', maps, fogs);
+  // The one comparison that isolates move ordering: same evaluator, same
+  // budget, the only difference being who chooses what to search.
+  await series('policy+net v net alone', 'policy', 'budgeted', maps, fogs);
 }
 await series('plain planner v greedy', 'plain', 'greedy', maps, fogs);

@@ -6,6 +6,7 @@ import { enumerateActions, applyAction, actionKey, type ActionDescriptor } from 
 import type { Agent } from './agent.ts';
 import type { GameEnvironment } from './environment.ts';
 import type { Player } from '../host/index.ts';
+import type { Game } from '../game/game.ts';
 
 export interface PlannerOptions {
   /** Plans kept at each step. Wider searches more orderings and costs linearly. */
@@ -30,7 +31,36 @@ export interface PlannerOptions {
    * turn has to end whatever the hardware is doing.
    */
   nodeBudget: number;
+  /**
+   * How much a deeper plan must beat the incumbent by, in standard deviations
+   * of its own layer's scores. 0 keeps the plain argmax.
+   *
+   * `best` is the maximum over every candidate the search ever scores, and the
+   * maximum of a noisy estimator is biased upward — the more candidates, the
+   * larger the bias. That is why more search made this agent worse, and
+   * measurement says it is the search rather than the evaluation: with a node
+   * budget, 200 -> 1600 nodes cost the net planner 0.071 and the hand-priced
+   * planner 0.078, the same slope from opposite ends of evaluation quality.
+   *
+   * The bias scales with the noise, so the threshold does too: a layer's own
+   * spread is the estimate of it that costs nothing to compute. A deeper plan
+   * has to clear the incumbent by more than the noise that would promote it by
+   * accident, which floors the search near the greedy line it started from
+   * rather than letting it wander off up its own error.
+   */
+  selectionSigmas: number;
   position: PositionWeights;
+  /**
+   * Ranks candidate actions in place of the greedy scorer, when one is loaded.
+   *
+   * `topActions` is where the hand-priced evaluation has the last word even
+   * with a value net installed: the beam only ever expands `branching` moves
+   * that `HeuristicAgent.scoreFor` liked, so a move it misprices is never
+   * searched, however good the evaluator that would have scored it. A learned
+   * policy is the piece that removes that, and it is why the policy head shares
+   * the value net's trunk -- ordering and evaluation want the same features.
+   */
+  policy?: PolicyOrdering;
   /** How positions are scored. Swap in a network without touching the search. */
   evaluator?: Evaluator<unknown>;
 }
@@ -41,8 +71,23 @@ export const DEFAULT_PLANNER_OPTIONS: PlannerOptions = {
   maxPlanLength: 24,
   timeBudgetMs: 400,
   nodeBudget: 0,
+  selectionSigmas: 0,
   position: DEFAULT_POSITION_WEIGHTS,
 };
+
+/**
+ * A move-ordering policy: score the candidates, best first.
+ *
+ * Async because the implementation is a network forward pass, and batched over
+ * the whole candidate list for the same reason `Evaluator` splits capture from
+ * score -- one call per layer rather than one per move.
+ */
+export interface PolicyOrdering<Capture = unknown> {
+  /** Runs inside the explored position; must not retain the live game. */
+  capture(game: Game, self: Player): Capture;
+  /** Runs outside it, on a whole beam layer: one score per action, per position. */
+  rank(batch: Array<{ capture: Capture; actions: ActionDescriptor[] }>): Promise<number[][]>;
+}
 
 interface Plan {
   actions: ActionDescriptor[];
@@ -159,22 +204,55 @@ export class PlannerAgent implements Agent {
     for (let depth = 0; depth < this.options.maxPlanLength; depth++) {
       const pending: Array<{ actions: ActionDescriptor[]; capture: unknown }> = [];
 
+      /**
+       * Two passes over the beam when a policy is ranking, one when it is not.
+       *
+       * `explore` rewinds synchronously, so nothing inside it may await — but a
+       * network policy is a forward pass, and running one per plan would cost
+       * more than the search it is guiding. So the first pass only reads each
+       * plan's position and the moves legal there, the ranking happens once for
+       * the whole layer outside any explore scope, and the second pass expands.
+       * Replaying a plan's actions is cheap next to a forward pass per plan.
+       */
+      const frames: Array<{ plan: Plan; options: ActionDescriptor[]; capture: unknown }> = [];
       for (const plan of beam) {
         if (exhausted()) break;
-
         env.explore(() => {
           for (const action of plan.actions) applyAction(env.game, action);
           const options = depth === 0 && plan.actions.length === 0
             ? legal
             : enumerateActions(env.game, { maxFieldChoices: 4 });
+          const player = env.game.map.getPlayer(seat);
+          frames.push({
+            plan,
+            options,
+            capture: this.options.policy && player
+              ? this.options.policy.capture(env.game, player)
+              : null,
+          });
+        });
+      }
 
-          for (const candidate of this.topActions(env, options)) {
+      let ranked: number[][] | null = null;
+      if (this.options.policy && frames.length > 0) {
+        ranked = await this.options.policy.rank(frames.map(frame => ({
+          capture: frame.capture,
+          actions: frame.options.filter(action => action.kind !== 'endTurn'),
+        })));
+      }
+
+      for (let index = 0; index < frames.length; index++) {
+        const frame = frames[index];
+        env.explore(() => {
+          for (const action of frame.plan.actions) applyAction(env.game, action);
+
+          for (const candidate of this.topActions(env, frame.options, ranked?.[index])) {
             env.explore(() => {
               if (!applyAction(env.game, candidate)) return;
               const player = env.game.map.getPlayer(seat);
               if (!player) return;
               pending.push({
-                actions: [...plan.actions, candidate],
+                actions: [...frame.plan.actions, candidate],
                 capture: this.evaluator.capture(env.game, player, belief),
               });
             });
@@ -188,7 +266,20 @@ export class PlannerAgent implements Agent {
       const next: Plan[] = pending.map((entry, i) => ({ actions: entry.actions, score: scores[i] }));
 
       next.sort((a, b) => b.score - a.score);
-      if (next[0].score > best.score) best = next[0];
+      // The bar rises with how noisy this layer looks, not with a fixed number,
+      // so one threshold serves an evaluator scoring in funds and one scoring
+      // in [-1, 1].
+      let bar = best.score;
+      if (this.options.selectionSigmas > 0 && next.length > 1) {
+        let sum = 0;
+        for (const plan of next) sum += plan.score;
+        const mean = sum / next.length;
+        let variance = 0;
+        for (const plan of next) variance += (plan.score - mean) ** 2;
+        const spread = Math.sqrt(variance / next.length);
+        bar += this.options.selectionSigmas * spread;
+      }
+      if (next[0].score > bar) best = next[0];
       beam = next.slice(0, this.options.beamWidth);
       if (exhausted()) break;
     }
@@ -196,12 +287,19 @@ export class PlannerAgent implements Agent {
     return best.actions;
   }
 
-  /** The most promising few actions, ranked by the greedy scorer. */
-  private topActions(env: GameEnvironment, options: ActionDescriptor[]): ActionDescriptor[] {
-    const scored = options
-      .filter(action => action.kind !== 'endTurn')
-      .map(action => ({ action, score: this.ordering.scoreFor(env, action) }));
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, this.options.branching).map(entry => entry.action);
+  /**
+   * The most promising few actions: the policy's ranking when one was computed
+   * for this position, the greedy scorer otherwise.
+   */
+  private topActions(
+    env: GameEnvironment, options: ActionDescriptor[], policyScores?: number[],
+  ): ActionDescriptor[] {
+    const candidates = options.filter(action => action.kind !== 'endTurn');
+    if (candidates.length === 0) return [];
+    const scores = policyScores && policyScores.length === candidates.length
+      ? policyScores
+      : candidates.map(action => this.ordering.scoreFor(env, action));
+    const order = candidates.map((_, i) => i).sort((a, b) => scores[b] - scores[a]);
+    return order.slice(0, this.options.branching).map(i => candidates[i]);
   }
 }

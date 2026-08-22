@@ -98,7 +98,54 @@ CE saved the weaker player — `train_value.py` now writes `value.pt`,
 **Do not pick a head, a dataset, or a checkpoint on a validation metric. Play
 the matches.**
 
-**Phase 4 passes: the time-scaling curve inverted.** 16 held-out maps, 64
+**Correction — Phase 4 does NOT pass. The pathology is in the search.**
+The wall-clock result below was measurement noise. Re-run with a deterministic
+node budget and a matched control, over an 8x range on 16 held-out maps:
+
+| 200 -> 1600 nodes | net | plain planner |
+|---|---|---|
+| overall | 0.727 -> 0.656 (**-0.071**) | 0.492 -> 0.414 (**-0.078**) |
+| fog off | -0.047 | -0.047 |
+| fog of war | -0.094 | -0.110 |
+
+Both degrade, at the same rate: difference-in-differences +0.007, i.e. nothing.
+The net lifts the whole curve about +0.24 and does not change its slope. So the
+value net fixed the *evaluation*, and "more search makes it worse" is a property
+of the **search**, which survives replacing the objective.
+
+The mechanism that fits is the winner's curse: the beam takes `max` over scored
+candidates, the argmax of a noisy estimator is biased upward, and the bias grows
+with the number of candidates — for any evaluator, however good. Fog makes
+evaluations noisier, which is why both agents fall faster there.
+
+This also **rules out fog self-blinding** as the cause. The steeper fog decline
+appears in the plain planner too, and `evaluatePosition` consumes `Belief` via
+`buildBeliefThreatMap` — a belief-blind encoder cannot explain degradation in an
+agent that is not belief-blind.
+
+**Tried and did not work: a noise-scaled acceptance margin.** `selectionSigmas`
+in `PlannerOptions` makes a deeper plan beat the incumbent by k standard
+deviations of its own layer's scores before it is accepted — the direct
+correction for an argmax bias that grows with candidate count. It is implemented
+and off by default. Swept over {0, 0.5, 1.0} x {200, 1600} nodes, both
+evaluators, 64 matches a cell:
+
+| n=1600, plain planner | rate |
+|---|---|
+| sigma 0 | 0.414 |
+| sigma 0.5 | 0.555 |
+| sigma 1.0 | 0.430 |
+
+Non-monotonic, and the same for the net (slopes -0.071, -0.016, -0.086). A
+stronger margin should help at least as much as a weaker one; it does not. The
+single good cell was noise. **Do not re-run this sweep at n=64** — the effects
+being chased are the size of the standard error. Either power it properly (a few
+hundred matches per cell) or attack the mechanism differently: average sibling
+scores rather than thresholding the max, or use a search that averages and
+anchors to a prior by construction. MCTS with PUCT does both, which is the real
+argument for it here — not that it searches better.
+
+**Superseded: the wall-clock measurement that suggested otherwise.** 16 held-out maps, 64
 matches per series, identical maps/seats/fog at both budgets, so the only
 variable is the evaluator:
 

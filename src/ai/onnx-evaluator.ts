@@ -12,6 +12,8 @@
  * onnxruntime-web against the same .onnx file — see `loadValueNet` for the split.
  */
 import type { Evaluator } from './evaluator.ts';
+import type { PolicyOrdering } from './planner.ts';
+import type { ActionDescriptor } from './actions.ts';
 import { ObservationEncoder } from './observation.ts';
 import type { Belief } from './belief.ts';
 import type { Game } from '../game/game.ts';
@@ -44,6 +46,9 @@ export interface ValueNetMeta {
   buildingCount: number;
   scalarNames: string[];
   none: number;
+  /** Present only on a model trained with a policy head. */
+  actions?: number;
+  actionNames?: string[];
 }
 
 /** The subset of an onnxruntime session this uses, so both runtimes fit. */
@@ -117,6 +122,37 @@ export class ValueNetEvaluator implements Evaluator<PackedPosition> {
     }
 
     return { planes: packed, scalars: observation.scalars, width, height, over };
+  }
+
+  /**
+   * The raw policy rows for a batch, one flat log-probability row per position.
+   *
+   * Separate from `score` because the search wants them at a different moment:
+   * ordering happens before a layer is expanded, evaluation after.
+   */
+  async policyRows(batch: PackedPosition[]): Promise<Array<ArrayLike<number>>> {
+    if (batch.length === 0) return [];
+    const { width, height } = batch[0];
+    const planeCount = 3 + this.meta.derivedCount;
+    const scalarCount = this.meta.scalarNames.length;
+    const planes = new Uint8Array(batch.length * planeCount * width * height);
+    const scalars = new Float32Array(batch.length * scalarCount);
+    for (let i = 0; i < batch.length; i++) {
+      planes.set(batch[i].planes, i * planeCount * width * height);
+      scalars.set(batch[i].scalars, i * scalarCount);
+    }
+    const output = await this.session.run({
+      planes: this.tensors.uint8(planes, [batch.length, planeCount, height, width]),
+      scalars: this.tensors.float32(scalars, [batch.length, scalarCount]),
+    });
+    const policy = output.policy;
+    if (!policy) throw new Error('model has no policy output; export a net trained with --policy 1');
+    const stride = policy.data.length / batch.length;
+    const rows: Array<ArrayLike<number>> = [];
+    for (let i = 0; i < batch.length; i++) {
+      rows.push(Array.prototype.slice.call(policy.data, i * stride, (i + 1) * stride));
+    }
+    return rows;
   }
 
   async score(batch: PackedPosition[]): Promise<number[]> {
@@ -222,5 +258,64 @@ export class BudgetedValueNet implements Evaluator<{ hand: number; packed: Packe
       out[order[rank]] = floor - (rank - cut + 1);
     }
     return out;
+  }
+}
+
+/**
+ * The learned move ordering, reading the same session as the value net.
+ *
+ * This is the half of the network that makes the value head worth having. With
+ * ordering left to `HeuristicAgent.scoreFor`, the beam only ever expands moves
+ * the hand-priced evaluation already liked, so a move it misprices is never
+ * searched however good the evaluator waiting to score it — the net could only
+ * ever re-rank someone else's shortlist.
+ *
+ * The graph emits log-probabilities over `(actions - 1) x height x width`
+ * squares plus a final slot for ending the turn, laid out exactly as
+ * `tools/extract-positions.ts` wrote the training targets: `kind * cells + tile`.
+ * Any drift between those two layouts is silent, which is why both derive the
+ * order from the same manifest.
+ */
+export class ValueNetPolicy implements PolicyOrdering<PackedPosition> {
+  private readonly net: ValueNetEvaluator;
+  private readonly actionIndex: Map<string, number>;
+  private readonly buildIndex: number;
+
+  constructor(net: ValueNetEvaluator, actionNames: string[]) {
+    this.net = net;
+    this.actionIndex = new Map(actionNames.map((name, i) => [name, i]));
+    this.buildIndex = this.actionIndex.get('ACTION_BUILD_UNITS') ?? -1;
+  }
+
+  capture(game: Game, self: Player): PackedPosition {
+    return this.net.capture(game, self, null as never);
+  }
+
+  /** Where an action's logit sits in the flattened policy row. */
+  private slot(action: ActionDescriptor, width: number, cells: number): number {
+    if (action.kind === 'build') {
+      return this.buildIndex < 0 ? -1 : this.buildIndex * cells + action.at.y * width + action.at.x;
+    }
+    if (action.kind === 'unit') {
+      const kind = this.actionIndex.get(action.actionId);
+      return kind === undefined ? -1 : kind * cells + action.to.y * width + action.to.x;
+    }
+    return -1;
+  }
+
+  async rank(batch: Array<{ capture: PackedPosition; actions: ActionDescriptor[] }>): Promise<number[][]> {
+    if (batch.length === 0) return [];
+    const rows = await this.net.policyRows(batch.map(entry => entry.capture));
+    return batch.map((entry, i) => {
+      const { width, height } = entry.capture;
+      const cells = width * height;
+      const row = rows[i];
+      // An action the vocabulary cannot name keeps last place rather than a
+      // score of zero, which would outrank every real log-probability.
+      return entry.actions.map(action => {
+        const slot = this.slot(action, width, cells);
+        return slot >= 0 && slot < row.length ? Number(row[slot]) : -Infinity;
+      });
+    });
   }
 }

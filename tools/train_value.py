@@ -40,6 +40,21 @@ def parse_args():
     p.add_argument('--width', type=int, default=64, help='trunk channels')
     p.add_argument('--blocks', type=int, default=6, help='residual blocks')
     p.add_argument('--input', choices=['embed', 'onehot'], default='embed')
+    p.add_argument('--policy', type=int, default=1,
+                   help='train a policy head beside the value head. It shares the '
+                        'trunk, so it costs one conv and a linear, and it is what '
+                        'replaces the greedy scorer in PlannerAgent.topActions -- '
+                        'today the net only ever reorders a shortlist the hand '
+                        'evaluation chose.')
+    p.add_argument('--policy-weight', type=float, default=0.15,
+                   help='weight of the policy loss against the value loss. The '
+                        'two are not on the same scale: policy cross-entropy '
+                        'starts near ln(actions * cells) ~ 10 and value near '
+                        'ln(3) ~ 1.1, so equal weighting hands the trunk almost '
+                        'entirely to the policy and the value head degrades. '
+                        '0.15 puts them within a factor of two at init; watch '
+                        'train/value_loss and train/policy_loss and retune if '
+                        'either flatlines.')
     p.add_argument('--head', choices=['scalar', 'wdl'], default='wdl',
                    help='scalar: tanh trained on MSE. wdl: three logits over '
                         '{loss, draw, win} trained on cross-entropy, read by the '
@@ -95,6 +110,12 @@ class Shards:
                                     shape=(n, planes, h, w)),
                 'scalars': np.fromfile(f'{stem}.scalars.f32', dtype=np.float32).reshape(n, -1),
                 'labels': np.fromfile(f'{stem}.labels.f32', dtype=np.float32),
+                # Written by extract-positions.ts; absent from datasets extracted
+                # before the policy head existed, which stay trainable value-only.
+                'actionType': (np.fromfile(f'{stem}.actiontype.i16', dtype=np.int16)
+                               if os.path.exists(f'{stem}.actiontype.i16') else None),
+                'actionTile': (np.fromfile(f'{stem}.actiontile.i32', dtype=np.int32)
+                               if os.path.exists(f'{stem}.actiontile.i32') else None),
                 'baseline': np.fromfile(f'{stem}.baseline.f32', dtype=np.float32),
                 'n': n, 'h': h, 'w': w, 'map': shard['map'],
             }
@@ -132,16 +153,51 @@ class Shards:
             scalars = torch.from_numpy(e['scalars'][idx])
             labels = torch.from_numpy(e['labels'][idx])
             base = torch.from_numpy(e['baseline'][idx])
+            if e['actionType'] is None:
+                policy = None
+            else:
+                policy = (torch.from_numpy(e['actionType'][idx].astype(np.int64)),
+                          torch.from_numpy(e['actionTile'][idx].astype(np.int64)))
             if augment:
                 # One transform for the whole batch: a rotation changes H and W,
                 # and a batch has to keep a single shape.
                 k = int(rng.integers(4))
+                flip = bool(rng.integers(2))
                 if k:
                     planes = torch.rot90(planes, k, dims=(2, 3))
-                if rng.integers(2):
+                if flip:
                     planes = torch.flip(planes, dims=(3,))
                 planes = planes.contiguous()
-            yield planes, scalars, labels, base, si
+                if policy is not None:
+                    kinds, tiles = policy
+                    moved, _, _ = move_tile(tiles, e['h'], e['w'], k, flip)
+                    policy = (kinds, moved)
+            yield planes, scalars, labels, base, si, policy
+
+
+def move_tile(tile, height, width, k, flip):
+    """
+    Carry a tile index through the same D4 transform the board just took.
+
+    Augmentation is free data for a value head, which only reads the board. A
+    policy head also *writes* to the board, so a rotated position with an
+    unrotated target teaches it to play at mirrored coordinates -- silently, and
+    the value loss would keep improving while it happened.
+
+    `torch.rot90(x, 1, (2, 3))` sends element (y, x) to (w-1-x, y) and swaps the
+    side lengths; the flip is on dim 3, which is x. Tiles of -1 mean "no square"
+    (ending the turn) and pass through untouched.
+    """
+    y = tile // width
+    x = tile % width
+    h, w = height, width
+    for _ in range(k):
+        y, x = w - 1 - x, y
+        h, w = w, h
+    if flip:
+        x = w - 1 - x
+    moved = y * w + x
+    return torch.where(tile < 0, tile, moved), h, w
 
 
 def norm_layer(kind, width, groups=8):
@@ -173,10 +229,16 @@ class ValueNet(nn.Module):
     """
 
     def __init__(self, spec, width=64, blocks=6, mode='embed', scalars=5, norm='group',
-                 head='wdl'):
+                 head='wdl', actions=0):
         super().__init__()
         self.mode = mode
         self.head_kind = head
+        # Actions are named per tile, so the policy is a stack of board-shaped
+        # planes -- one per action id -- and stays fully convolutional like the
+        # trunk. Ending the turn is the exception: it is a choice about the whole
+        # turn, not about a square, so it comes off the pooled features instead
+        # of being pinned to an arbitrary tile.
+        self.actions = actions
         t, u, b, d = (spec['terrainCount'], spec['unitCount'],
                       spec['buildingCount'], spec['derivedCount'])
         self.counts = (t, u, b)
@@ -199,6 +261,13 @@ class ValueNet(nn.Module):
             nn.Linear(width * 2 + scalars, 128), nn.ReLU(inplace=True),
             nn.Linear(128, 64), nn.ReLU(inplace=True),
             nn.Linear(64, 3 if head == 'wdl' else 1))
+        if actions:
+            # actions - 1 spatial planes; the last slot is END_TURN.
+            self.policy_conv = nn.Sequential(
+                nn.Conv2d(width, width, 3, padding=1, bias=False),
+                norm_layer(norm, width), nn.ReLU(inplace=True),
+                nn.Conv2d(width, actions - 1, 1))
+            self.policy_end = nn.Linear(width * 2 + scalars, 1)
 
     def features(self, planes):
         """uint8 index planes -> float feature planes, either embedded or one-hot."""
@@ -229,7 +298,26 @@ class ValueNet(nn.Module):
             F.adaptive_max_pool2d(x, 1).flatten(1),
             scalars], dim=1)
         out = self.head(pooled)
-        return out if self.head_kind == 'wdl' else torch.tanh(out).squeeze(1)
+        value = out if self.head_kind == 'wdl' else torch.tanh(out).squeeze(1)
+        if not self.actions:
+            return value
+        # (N, A-1, H, W) flattened to one row per position, END_TURN appended, so
+        # the whole turn's choice is a single softmax the search can sample from.
+        spatial = self.policy_conv(x).flatten(1)
+        return value, torch.cat([spatial, self.policy_end(pooled)], dim=1)
+
+
+def policy_target(kinds, tiles, actions, cells):
+    """
+    Flat index into the policy logits, or -1 where there is no valid target.
+
+    Spatial actions sit at `kind * cells + tile`; END_TURN is the final slot.
+    An action the vocabulary cannot name arrives as kind -1 and is masked out
+    rather than pointed at a wrong class.
+    """
+    end = (actions - 1) * cells
+    flat = torch.where(tiles >= 0, kinds * cells + tiles, torch.full_like(tiles, end))
+    return torch.where(kinds >= 0, flat, torch.full_like(flat, -1))
 
 
 def expected_value(out, head):
@@ -288,11 +376,23 @@ def evaluate(model, shards, args, rng):
     model.eval()
     preds, labels, bases, logits, blank = [], [], [], [], []
     shard_ids = []
-    for planes, scalars, y, base, si in shards.batches(
+    policy_right = policy_seen = 0
+    for planes, scalars, y, base, si, policy in shards.batches(
             args.batch, rng, augment=0, max_per_shard=args.val_per_shard):
         planes = planes.to(args.device)
         scalars = scalars.to(args.device)
         out = model(planes, scalars)
+        if isinstance(out, tuple):
+            out, policy_logits = out
+            if policy is not None:
+                cells = planes.shape[2] * planes.shape[3]
+                target = policy_target(policy[0], policy[1],
+                                       policy_logits.shape[1] // cells + 1, cells).to(args.device)
+                valid = target >= 0
+                if valid.any():
+                    picked = policy_logits[valid].argmax(1)
+                    policy_right += int((picked == target[valid]).sum())
+                    policy_seen += int(valid.sum())
         preds.append(expected_value(out, args.head).float().cpu().numpy())
         if args.head == 'wdl':
             logits.append(out.float().cpu().numpy())
@@ -302,7 +402,10 @@ def evaluate(model, shards, args, rng):
             # `day` alone while telling sibling positions apart no better than
             # chance. If blanking barely moves CE, the trunk learned nothing and
             # the pooled numbers below are measuring a shortcut.
-            blank.append(model(planes, torch.zeros_like(scalars)).float().cpu().numpy())
+            ablated = model(planes, torch.zeros_like(scalars))
+            if isinstance(ablated, tuple):
+                ablated = ablated[0]
+            blank.append(ablated.float().cpu().numpy())
         labels.append(y.numpy())
         bases.append(base.numpy())
         shard_ids.append(np.full(len(y), si))
@@ -337,6 +440,10 @@ def evaluate(model, shards, args, rng):
         'maps_scored': len(per_map_net),
         'n': len(labels),
     }
+    if policy_seen:
+        # Share of positions where the policy's top choice is the move actually
+        # played. This is what decides whether it can replace topActions.
+        stats['policy_top1'] = policy_right / policy_seen
     if args.head == 'wdl':
         z = torch.from_numpy(np.concatenate(logits))
         cls = classes_from(torch.from_numpy(labels))
@@ -377,10 +484,14 @@ def main():
           f"validation={len({e['map'] for e in val.entries})}")
 
     scalars = train.entries[0]['scalars'].shape[1]
+    actions = manifest.get('actionCount', 0) if args.policy else 0
+    if args.policy and not actions:
+        print('no action targets in this dataset -- policy head disabled')
     model = ValueNet(manifest, args.width, args.blocks, args.input, scalars,
-                     args.norm, args.head).to(args.device)
+                     args.norm, args.head, actions).to(args.device)
     params = sum(p.numel() for p in model.parameters())
-    print(f"model: {args.head} head, {args.input}/{args.norm}, {args.blocks} blocks x "
+    print(f"model: {args.head} head{f' + policy ({actions} actions)' if actions else ''}, "
+          f"{args.input}/{args.norm}, {args.blocks} blocks x "
           f"{args.width} ch, {params/1e3:.0f}k params, device {args.device}")
 
     run = None
@@ -424,11 +535,15 @@ def main():
     for epoch in range(args.epochs):
         started = time.time()
         running, seen = 0.0, 0
-        for planes, scalars_b, y, _, _shard in train.batches(args.batch, rng, args.augment):
+        running_value, running_policy = 0.0, 0.0
+        for planes, scalars_b, y, _, _shard, policy in train.batches(
+                args.batch, rng, args.augment):
             planes = planes.to(args.device)
             scalars_b = scalars_b.to(args.device)
             y = y.to(args.device)
             out = model(planes, scalars_b)
+            if actions:
+                out, policy_logits = out
             if args.head == 'wdl':
                 loss = F.cross_entropy(out, classes_from(y), weight=class_weights)
             else:
@@ -436,6 +551,16 @@ def main():
                 if args.draw_weight != 1.0:
                     loss = loss * torch.where(y == 0, args.draw_weight, 1.0)
                 loss = loss.mean()
+            value_loss = float(loss.detach())
+            policy_loss = 0.0
+            if actions and policy is not None:
+                cells = planes.shape[2] * planes.shape[3]
+                target = policy_target(policy[0], policy[1], actions, cells).to(args.device)
+                # ignore_index drops the unnamed actions rather than teaching a
+                # wrong class for them.
+                policy_term = F.cross_entropy(policy_logits, target, ignore_index=-1)
+                policy_loss = float(policy_term.detach())
+                loss = loss + args.policy_weight * policy_term
             opt.zero_grad(set_to_none=True)
             loss.backward()
             if args.clip:
@@ -445,13 +570,19 @@ def main():
                 sched.step()
             step += 1
             running += float(loss.detach()) * len(y)
+            running_value += value_loss * len(y)
+            running_policy += policy_loss * len(y)
             seen += len(y)
             if run is not None and step % args.log_every == 0:
                 run.log({'step': step, 'train/loss_running': running / max(seen, 1),
+                         'train/value_loss': running_value / max(seen, 1),
+                         'train/policy_loss': running_policy / max(seen, 1),
                          'lr': sched.get_last_lr()[0]}, step=step)
 
         stats = evaluate(model, val, args, rng)
         line = f"epoch {epoch+1:2d}  train {running/max(seen,1):.4f}  "
+        if actions:
+            line += (f"(v {running_value/max(seen,1):.3f} p {running_policy/max(seen,1):.3f})  ")
         if args.head == 'wdl':
             line += (f"val ce {stats['ce']:.4f} (prior {stats['const_ce']:.4f})  "
                      f"draw {stats['draw_pred']*100:.0f}%/{stats['draw_true']*100:.0f}%  ")
@@ -461,6 +592,8 @@ def main():
         if args.head == 'wdl':
             share = stats['trunk_share']
             line += ('trunk n/a  ' if share != share else f"trunk {share*100:.0f}%  ")
+        if 'policy_top1' in stats:
+            line += f"policy top1 {stats['policy_top1']*100:.1f}%  "
         line += f"{time.time()-started:.0f}s"
         print(line)
 
@@ -492,6 +625,8 @@ def main():
                     'val/blank_ce': stats['blank_ce'],
                     'val/trunk_share': stats['trunk_share'],
                 })
+            if 'policy_top1' in stats:
+                payload['val/policy_top1'] = stats['policy_top1']
             run.log(payload, step=step)
 
         # Three checkpoints, because no single validation metric here predicts
@@ -501,10 +636,15 @@ def main():
         # a head-to-head between two heads once inverted both of them. Keep the
         # candidates cheap (2 MB each) and let `bench-valuenet.ts` decide.
         os.makedirs(args.out, exist_ok=True)
-        payload = {'args': vars(args),
+        payload = {'args': vars(args), 'actions': actions,
                    'manifest': {k: manifest[k] for k in
                                 ('channels', 'terrainCount', 'unitCount',
-                                 'buildingCount', 'derivedCount', 'scalarNames')}}
+                                 'buildingCount', 'derivedCount', 'scalarNames')
+                                # The policy head's output vocabulary has to
+                                # travel with the weights, or the exported graph
+                                # cannot say what its logits mean.
+                                + ('actionCount', 'actionNames')
+                                if k in manifest}}
 
         def save(name, why):
             torch.save({**payload, 'model': model.state_dict(),
