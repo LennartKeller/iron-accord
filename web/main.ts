@@ -7,7 +7,7 @@ import { assetFileName } from '../src/cw/assetname.ts';
 import { bootstrapBrowser } from '../src/game/bootstrap.browser.ts';
 import { gameMapFromScene } from '../src/game/fromscene.ts';
 import { resolveBuildingSprites, resolveUnitSprites } from '../src/maps/loadmap.ts';
-import { Game, type ActionStep } from '../src/game/game.ts';
+import { Game, fogViewerIndex, type ActionStep } from '../src/game/game.ts';
 import { describeVictoryRules, type VictoryRuleInfo } from '../src/game/victory.ts';
 import { threatenedTiles } from '../src/game/threat.ts';
 import {
@@ -126,6 +126,21 @@ const PLAYER_COLORS = ['#ff6b4a', '#58a6ff', '#3fb950', '#d29922', '#bc8cff', '#
 const playerColor = (index: number) => PLAYER_COLORS[index % PLAYER_COLORS.length];
 
 /**
+ * Whose fog the board is drawn under. Not simply the current player: while an
+ * AI seat plays, its view would print everything the machine knows — its own
+ * hidden units included — onto the watching human's screen (fogViewerIndex).
+ */
+function fogViewer() {
+  const seat = fogViewerIndex(
+    game!.currentPlayerIndex,
+    game!.map.players.length,
+    index => config?.seats[index]?.controller !== 'ai',
+    index => game!.map.players[index]?.isDefeated ?? true,
+  );
+  return game!.map.players[seat] ?? game!.currentPlayer;
+}
+
+/**
  * Re-resolves building sprites from the live game, so a captured building shows
  * its new owner's colours immediately.
  */
@@ -133,7 +148,7 @@ function syncBuildings(): void {
   if (!game || !registry || !scene) { renderer.liveBuildings = null; return; }
   resolveBuildingSprites(game.map, registry);
 
-  const viewer = game.currentPlayer;
+  const viewer = fogViewer();
   const buildings: NonNullable<typeof renderer.liveBuildings> = [];
   for (let y = 0; y < game.map.height; y++) {
     for (let x = 0; x < game.map.width; x++) {
@@ -162,7 +177,7 @@ function syncUnits(): void {
   // is not in the scene's palette and would otherwise render as nothing.
   resolveUnitSprites(game.map, registry);
 
-  const viewer = game.currentPlayer;
+  const viewer = fogViewer();
   renderer.liveUnits = game.map.units
     // Under fog a unit is only drawn where its tile is actually visible.
     .filter(unit => !fogEnabled() || viewer.getFieldVisible(unit.x, unit.y))
@@ -375,6 +390,10 @@ function resetInteraction(): void {
   destination = null;
   unloadIndex = -1;
   pickFields = [];
+  // A transport that moved for an unload that never happened goes back to its
+  // origin — and must be redrawn there, or the sprite stays at the abandoned
+  // destination until something else refreshes the board.
+  if (game?.cancelUnloadMove()) syncUnits();
   game?.cancelAction();
   game?.clearSelection();
   renderer.highlights = [];
@@ -715,6 +734,9 @@ new PointerControls(canvas, renderer.camera, {
 endTurnButton.addEventListener('click', () => {
   if (aiRunning) return;
   lastCycledAt = null;
+  // Before the turn changes hands, not after: a half-entered unload must put
+  // its transport back first, so end-of-turn hooks see it where it really is.
+  resetInteraction();
   game?.endTurn();
   afterTurnAction();
 });

@@ -7,7 +7,7 @@ import { bootstrap } from '../src/game/bootstrap.node.ts';
 import { cwRoot } from '../src/cw/resources.node.ts';
 import { computeMovementRange, stoppableTiles, pathTo, key } from '../src/game/pathfinding.ts';
 import { Game } from '../src/game/game.ts';
-import type { GameMap } from '../src/host/index.ts';
+import { GameEnums, type GameMap } from '../src/host/index.ts';
 
 const { registry } = bootstrap();
 const mapFile = path.join(cwRoot(), 'maps/2_player/60-ZWEITER KRIEG.map');
@@ -144,6 +144,37 @@ describe('turn structure', () => {
     expect(unit.hasMoved).toBe(true);
     expect(game.unitAt(3, 8)).toBeNull();
     expect(game.select(3, 6)).toBeNull();    // already moved this turn
+  });
+
+  it('resets capture progress and recomputes fog on a plain move', () => {
+    const unit = game.unitAt(3, 8)!;
+    unit.setCapturePoints(10);
+
+    map.getGameRules().setFogMode(GameEnums.Fog_OfWar);
+    map.vision.update();
+    const viewer = map.getPlayer(0)!;
+    // Infantry see 2, so a tile 5 away starts dark.
+    expect(viewer.getFieldVisible(8, 8)).toBe(false);
+
+    game.select(3, 8);
+    expect(game.moveSelected(6, 8).moved).toBe(true);
+
+    // game/unit.cpp: moveUnitToField resets capture points first — banked
+    // progress must not travel with the unit to its next building.
+    expect(unit.getCapturePoints()).toBe(0);
+    // And the move itself recomputes fog rather than waiting for the next
+    // action to happen to do it.
+    expect(viewer.getFieldVisible(8, 8)).toBe(true);
+  });
+
+  it('keeps capture progress on a move that stays in place', () => {
+    // game/unit.cpp: Unit::moveUnit relocates only for a real path, so a unit
+    // capturing where it stands keeps accumulating across turns.
+    const unit = game.unitAt(3, 8)!;
+    unit.setCapturePoints(10);
+    game.select(3, 8);
+    expect(game.moveSelected(3, 8).moved).toBe(true);
+    expect(unit.getCapturePoints()).toBe(10);
   });
 
   it('refuses unreachable and occupied destinations', () => {

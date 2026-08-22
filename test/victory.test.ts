@@ -81,6 +81,38 @@ describe('victory rules', () => {
     expect(byId.get('VICTORYRULE_DOMINATION')!.items).toHaveLength(5);
   });
 
+  it('makes a decided game read-only', () => {
+    const { map, game } = newGame();
+    const player = map.getPlayer(0)!;
+    const survivor = map.addUnit('INFANTRY', player, 3, 8);
+    survivor.hasMoved = false;
+
+    let factory: { x: number; y: number } | null = null;
+    for (let y = 0; y < map.height && !factory; y++) {
+      for (let x = 0; x < map.width && !factory; x++) {
+        if (map.getTerrain(x, y).getBuilding()?.getBuildingID() === 'FACTORY') factory = { x, y };
+      }
+    }
+    map.getTerrain(factory!.x, factory!.y).getBuilding()!.setOwner(player);
+    player.funds = 99999;
+    expect(game.canProduceAt(factory!.x, factory!.y)).toBe(true);
+
+    map.getPlayer(1)!.getBuildings('HQ').at(0)!.setOwner(player);
+    expect(game.checkGameOver()).not.toBeNull();
+
+    // endTurn already refuses on a finished game and the AI's enumerator
+    // returns nothing — the human-facing entry points have to agree, or the
+    // "final" position keeps changing after the banner comes down.
+    expect(game.select(survivor.x, survivor.y)).toBeNull();
+    expect(game.performAction('ACTION_WAIT', survivor,
+      { x: survivor.x, y: survivor.y })).toBe(false);
+    expect(survivor.hasMoved).toBe(false);
+    expect(game.beginAction('ACTION_WAIT', survivor,
+      { x: survivor.x, y: survivor.y }).kind).toBe('invalid');
+    expect(game.canProduceAt(factory!.x, factory!.y)).toBe(false);
+    expect(game.buildUnit(factory!.x, factory!.y, 'INFANTRY')).toBe(false);
+  });
+
   it('restores latched rule state with a snapshot', () => {
     // The no-HQ rule only applies to a player who has owned an HQ. Restoring a
     // snapshot from before a capture has to un-arm it again, or exploring a

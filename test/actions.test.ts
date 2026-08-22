@@ -440,6 +440,47 @@ describe('transport', () => {
     expect(map.getUnitAt(targets[0].x, targets[0].y)).toBe(infantry);
   });
 
+  it('returns a transport to its origin when an unload is cancelled', () => {
+    const { map, game } = newGame();
+    const player = map.getPlayer(0)!;
+    const apc = map.addUnit('APC', player, 3, 8);
+    apc.loadUnit(map.addUnit('INFANTRY', player, 4, 8));
+    apc.hasMoved = false;
+    map.vision.update();
+
+    const fuelBefore = apc.fuel;
+    game.select(3, 8);
+    expect(game.moveForUnload(apc, 3, 6)).toBe(true);
+    expect(map.getUnitAt(3, 6)).toBe(apc);
+
+    // Abandoning the unload rolls the provisional move back — position and
+    // fuel both — or the still-unspent transport gets to move a second time.
+    expect(game.cancelUnloadMove()).toBe(true);
+    expect(map.getUnitAt(3, 8)).toBe(apc);
+    expect(map.getUnitAt(3, 6)).toBeNull();
+    expect(apc.fuel).toBe(fuelBefore);
+    expect(apc.hasMoved).toBe(false);
+  });
+
+  it('does not roll the move back once cargo has actually dropped', () => {
+    const { map, game } = newGame();
+    const player = map.getPlayer(0)!;
+    const apc = map.addUnit('APC', player, 3, 8);
+    apc.loadUnit(map.addUnit('INFANTRY', player, 4, 8));
+    apc.hasMoved = false;
+    map.vision.update();
+
+    game.select(3, 8);
+    expect(game.moveForUnload(apc, 3, 6)).toBe(true);
+    const targets = game.unloadTargets(apc, 0);
+    expect(game.unloadUnit(apc, 0, targets[0].x, targets[0].y)).toBe(true);
+    apc.hasMoved = true;                        // as the UI marks it on a drop
+
+    // The drop committed the move; a late cancel must be a no-op.
+    expect(game.cancelUnloadMove()).toBe(false);
+    expect(map.getUnitAt(3, 6)).toBe(apc);
+  });
+
   it('respects transport lists and capacity', () => {
     const { map } = newGame();
     const player = map.getPlayer(0)!;

@@ -159,6 +159,7 @@ export class Game {
    */
   performAction(actionID: string, unit: Unit, destination: { x: number; y: number },
                 configure?: (action: GameAction) => void): boolean {
+    if (this.over) return false;               // a decided game is read-only
     const script = this.registry[actionID];
     if (!script?.perform) return false;
     const action = this.buildAction(actionID, unit, destination);
@@ -232,6 +233,7 @@ export class Game {
    * complete immediately and report 'done'.
    */
   beginAction(actionID: string, unit: Unit, destination: { x: number; y: number }): ActionStep {
+    if (this.over) return { kind: 'invalid' }; // a decided game is read-only
     const action = this.buildAction(actionID, unit, destination);
     if (!action.canBePerformed()) return { kind: 'invalid' };
     this.pending = { action, unit, destination };
@@ -350,8 +352,33 @@ export class Game {
     if (transport.x === x && transport.y === y) return true;
     const tile = this.range?.tiles.get(key(x, y));
     if (!tile || !tile.canStop) return false;
+    // Remember where it came from: until a drop commits the unload, the move
+    // is provisional. Without this a cancelled unload leaves the transport at
+    // its destination, still unspent — free extra moves, once per cancel.
+    this.unloadOrigin = { unit: transport, x: transport.x, y: transport.y, fuel: transport.fuel };
     transport.fuel = Math.max(0, transport.fuel - tile.cost);
     transport.moveUnitToField(x, y);
+    this.map.vision.update();
+    return true;
+  }
+
+  /** A transport relocated by moveForUnload, until a drop commits the move. */
+  private unloadOrigin: { unit: Unit; x: number; y: number; fuel: number } | null = null;
+
+  /**
+   * Abandons an unload after moveForUnload: the transport returns to where it
+   * stood, fuel included — in Commander Wars a cancelled multi-step action
+   * never happened. Returns whether anything was put back, so the UI knows to
+   * redraw. A bare x/y write is right here: this is an undo, not a move, and
+   * the forward moveUnitToField already cleared any capture points.
+   */
+  cancelUnloadMove(): boolean {
+    const origin = this.unloadOrigin;
+    this.unloadOrigin = null;
+    if (!origin || origin.unit.hasMoved) return false;
+    origin.unit.x = origin.x;
+    origin.unit.y = origin.y;
+    origin.unit.fuel = origin.fuel;
     this.map.vision.update();
     return true;
   }
@@ -363,6 +390,8 @@ export class Game {
     if (!this.unloadTargets(transport, cargoIndex).some(t => t.x === x && t.y === y)) return false;
 
     transport.unloadUnit(cargo, { x, y });
+    // The drop commits the transport's move; it must not snap back now.
+    this.unloadOrigin = null;
     this.map.vision.update();
     return true;
   }
@@ -388,6 +417,7 @@ export class Game {
 
   /** True when this tile can start production for the current player. */
   canProduceAt(x: number, y: number): boolean {
+    if (this.over) return false;               // a decided game is read-only
     const building = this.map.getTerrain(x, y).getBuilding();
     if (!building || building.getOwner() !== this.currentPlayer) return false;
     if (this.map.getUnitAt(x, y)) return false;
@@ -403,6 +433,7 @@ export class Game {
    * id and its cost; the script spawns it, charges the player and marks it spent.
    */
   buildUnit(x: number, y: number, unitID: string): boolean {
+    if (this.over) return false;               // a decided game is read-only
     const building = this.map.getTerrain(x, y).getBuilding();
     const player = building?.getOwner();
     if (!building || player !== this.currentPlayer) return false;
@@ -547,9 +578,15 @@ export class Game {
     return this.map.getUnitAt(x, y);
   }
 
-  /** Can the current player act with this unit right now? */
+  /**
+   * Can the current player act with this unit right now? A finished game is
+   * read-only: endTurn already refuses and enumerateActions returns nothing,
+   * so letting selection through here would leave the human UI as the one
+   * caller that can still rewrite a decided board.
+   */
   canControl(unit: Unit | null): unit is Unit {
-    return unit !== null && unit.getOwner() === this.currentPlayer && !unit.hasMoved;
+    return this.over === null && unit !== null
+      && unit.getOwner() === this.currentPlayer && !unit.hasMoved;
   }
 
   /**
@@ -594,11 +631,16 @@ export class Game {
     if (!tile.canStop) return { moved: false, path: [], cost: 0, reason: 'occupied' };
 
     const path = pathTo(range, x, y);
-    unit.x = x;
-    unit.y = y;
     unit.fuel = Math.max(0, unit.fuel - tile.cost);
+    // Through moveUnitToField, not a bare x/y write: it resets capture
+    // progress, which must not survive a move (see Unit.moveUnitToField). Only
+    // when the unit actually leaves its tile though — game/unit.cpp:
+    // Unit::moveUnit skips the relocation for a one-point path, so a unit
+    // acting in place keeps the capture it has banked.
+    if (unit.x !== x || unit.y !== y) unit.moveUnitToField(x, y);
     unit.hasMoved = true;
     this.clearSelection();
+    this.map.vision.update();
     return { moved: true, path, cost: tile.cost };
   }
 
@@ -615,16 +657,18 @@ export class Game {
     this.endOfTurn(this.currentPlayer);
     this.clearSelection();
     // Skip anyone already knocked out.
+    let newDay = false;
     for (let step = 0; step < this.map.players.length; step++) {
       this.currentPlayerIndex += 1;
       if (this.currentPlayerIndex >= this.map.players.length) {
         this.currentPlayerIndex = 0;
         this.day += 1;
+        newDay = true;
       }
       if (!this.currentPlayer.isDefeated) break;
     }
     this.map.currentPlayerIndex = this.currentPlayerIndex;
-    this.beginTurn(this.currentPlayer);
+    this.beginTurn(this.currentPlayer, newDay);
     this.map.vision.update();
     this.checkGameOver();
   }
@@ -671,8 +715,15 @@ export class Game {
    * runs the unit's startOfTurn before the building's. That order matters: an
    * aircraft burns fuel in its own hook and is then refuelled by the airport it
    * is sitting on, so reversing it would strand planes that should survive.
+   *
+   * `neutralTurn` marks the first turn of a new day, as nextPlayer() reports it
+   * in the engine — NOT "player index 0 is up". Keying the neutral hooks to
+   * seat 0 would stop fires spreading and plasma evolving for the rest of the
+   * match the moment player 0 is defeated, because the rotation skips dead
+   * seats and never lands on index 0 again. Defaults to true for the opening
+   * turn the constructor runs.
    */
-  private beginTurn(player: Player): void {
+  private beginTurn(player: Player, neutralTurn = true): void {
     for (const unit of player.units) unit.hasMoved = false;
     player.funds += this.calcIncome(player);
 
@@ -687,7 +738,7 @@ export class Game {
 
         // game/gamemap.cpp: startOfTurnNeutral runs terrain and unowned
         // buildings once per day — this is what spreads fires and grows plasma.
-        if (this.currentPlayerIndex === 0) {
+        if (neutralTurn) {
           terrain.startOfTurn();
           if (building && building.getOwner() === null) building.startOfTurn();
         }
@@ -750,6 +801,33 @@ export class Game {
   pendingUnits(): Unit[] {
     return this.currentPlayer.units.filter(unit => !unit.hasMoved);
   }
+}
+
+/**
+ * The seat whose fog of war the person at the screen should see.
+ *
+ * During a human turn that is simply the current player — in hotseat play the
+ * device changes hands with the turn. While an AI plays, though, drawing the
+ * board through the current player's eyes puts the machine's entire
+ * intelligence picture on screen — its own hidden units and everything it has
+ * spotted — for its whole turn, which under fog is free enemy recon every
+ * round. The view therefore stays with a human: the next human seat in turn
+ * order, which is whoever is holding the device waiting to play. With no
+ * living human seat (an all-AI spectate) the current player's view is the
+ * only sensible one left.
+ */
+export function fogViewerIndex(
+  currentIndex: number,
+  seatCount: number,
+  isHuman: (seat: number) => boolean,
+  isDefeated: (seat: number) => boolean,
+): number {
+  if (seatCount <= 0 || isHuman(currentIndex)) return currentIndex;
+  for (let step = 1; step <= seatCount; step++) {
+    const seat = (currentIndex + step) % seatCount;
+    if (isHuman(seat) && !isDefeated(seat)) return seat;
+  }
+  return currentIndex;
 }
 
 function safeCall<T>(fn: () => T): T | undefined {
