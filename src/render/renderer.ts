@@ -72,6 +72,7 @@ export class SceneRenderer {
     this.highlights = [];
     this.path = [];
     this.fog = null;
+    this.visionOverlay = null;
     this.liveBuildings = null;
     await this.sprites.preload(scene.spriteIds);
     await this.bakeTerrain(scene);
@@ -174,6 +175,8 @@ export class SceneRenderer {
     // Fog sits above the board but below the player's own overlays, so a
     // selection or path stays readable across unseen ground.
     this.drawFog(ctx, scene);
+    // Same layer as fog: above the board, below selection and path.
+    this.drawVisionOverlay(ctx, scene);
     this.drawPath(ctx);
     if (this.showGrid) this.drawGrid(ctx, scene);
     this.drawSelection(ctx);
@@ -297,6 +300,33 @@ export class SceneRenderer {
    * Shrouded tiles are painted over; the units on them simply are not supplied.
    */
   fog: Uint8Array | null = null;
+
+  /**
+   * What the ACTING player can see, drawn as a light wash instead of occlusion.
+   *
+   * For watching an AI play: the board stays fully visible, but the tiles the
+   * agent is blind to are shaded, so a move that looks foolish can be read
+   * against what the agent actually knew. Occluding fog (`fog`) answers "what
+   * may I see"; this answers "what is it working with", and they are different
+   * questions — which is why this is a separate field rather than a mode of
+   * the same one.
+   */
+  visionOverlay: Uint8Array | null = null;
+
+  private drawVisionOverlay(ctx: CanvasRenderingContext2D, scene: Scene): void {
+    if (!this.visionOverlay) return;
+    ctx.save();
+    for (let y = 0; y < scene.height; y++) {
+      for (let x = 0; x < scene.width; x++) {
+        // Clear tiles are left alone, so the unshaded region IS the agent's
+        // vision — the eye reads the negative space without a legend.
+        if (this.visionOverlay[y * scene.width + x] === 2) continue;
+        ctx.fillStyle = 'rgba(13, 17, 23, 0.34)';
+        ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+      }
+    }
+    ctx.restore();
+  }
 
   private drawFog(ctx: CanvasRenderingContext2D, scene: Scene): void {
     if (!this.fog) return;

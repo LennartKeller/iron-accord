@@ -35,6 +35,7 @@ const menuEl = $('#menu');
 const bannerEl = $('#banner');
 const endTurnButton = $<HTMLButtonElement>('#endturn');
 const nextUnitButton = $<HTMLButtonElement>('#nextunit');
+const observerButton = $<HTMLButtonElement>('#observer');
 const picker = $<HTMLDialogElement>('#picker');
 const settingsDialog = $<HTMLDialogElement>('#settingsDialog');
 const setup = $<HTMLDialogElement>('#setup');
@@ -172,10 +173,27 @@ function cycleObserver(): void {
   );
   syncUnits();
   syncBuildings();
-  statusEl.textContent = observerSeat === null
-    ? 'Observing: omniscient · V to change'
-    : `Observing: player ${observerSeat + 1}'s view · V to change`;
+  syncObserver();
   requestRender();
+}
+
+/**
+ * The observer control, which is the only place this mode is visible.
+ *
+ * It lives on a button rather than in the status line because `describe()`
+ * rewrites the status on every tile tap, so a hint there disappears the moment
+ * you touch the board — and a keyboard shortcut alone is no use on a phone,
+ * which is where this app mostly gets played.
+ */
+function syncObserver(): void {
+  const spectating = isSpectating();
+  observerButton.hidden = !spectating;
+  if (!spectating) return;
+  observerButton.textContent = observerSeat === null
+    ? '👁 All'
+    : `👁 P${observerSeat + 1}`;
+  observerButton.style.color = observerSeat === null
+    ? '' : playerColor(observerSeat);
 }
 
 /**
@@ -236,6 +254,12 @@ function syncUnits(): void {
       };
     });
   renderer.fog = fogEnabled() && viewer ? game.map.vision.gridFor(viewer) : null;
+  // Omniscient observers see the whole board, so nothing indicates what the
+  // agent that is currently moving can actually see. Shading its blind tiles
+  // turns "why did it do that?" into a question the screen can answer.
+  renderer.visionOverlay = fogEnabled() && !viewer && isSpectating()
+    ? game.map.vision.gridFor(game.currentPlayer)
+    : null;
 }
 
 /**
@@ -261,6 +285,7 @@ function syncTurn(): void {
     turnEl.textContent = '';
     endTurnButton.hidden = true;
     nextUnitButton.hidden = true;
+    observerButton.hidden = true;
     return;
   }
   turnEl.textContent = `Day ${game.day} · P${game.currentPlayerIndex + 1} · ${game.currentPlayer.funds}G`;
@@ -271,6 +296,7 @@ function syncTurn(): void {
   nextUnitButton.hidden = false;
   nextUnitButton.disabled = pending === 0 || aiRunning;
   nextUnitButton.textContent = pending > 0 ? `Next (${pending})` : 'Next';
+  syncObserver();
 }
 
 /**
@@ -783,6 +809,7 @@ endTurnButton.addEventListener('click', () => {
 });
 
 nextUnitButton.addEventListener('click', cycleToNextUnit);
+observerButton.addEventListener('click', cycleObserver);
 
 window.addEventListener('keydown', event => {
   if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -846,10 +873,7 @@ async function loadScene(id: string): Promise<void> {
   syncTurn();
 
   titleEl.textContent = `${scene!.name}${scene!.author ? ` — ${scene!.author}` : ''}`;
-  statusEl.textContent = isSpectating()
-    // Otherwise the mode is invisible: an all-AI game just looks like a game.
-    ? `${scene!.width}×${scene!.height} · ${scene!.players.length}P · observing (omniscient), V to change`
-    : `${scene!.width}×${scene!.height} · ${scene!.players.length}P`;
+  statusEl.textContent = `${scene!.width}×${scene!.height} · ${scene!.players.length}P`;
 
   // Debug affordances: ?select=x,y picks a unit up and ?to=x,y walks it to a
   // destination and opens the action menu, so any board state is reproducible
