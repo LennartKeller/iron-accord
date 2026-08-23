@@ -98,6 +98,30 @@ CE saved the weaker player — `train_value.py` now writes `value.pt`,
 **Do not pick a head, a dataset, or a checkpoint on a validation metric. Play
 the matches.**
 
+**The validation metrics measure a class the search never compares — this is
+why every offline number here has been misleading.** `outcomeFor` in
+`extract-positions.ts` is a pure function of `(replay.winner, playerIndex)` and
+never reads the board, so every position a seat faced in one game carries an
+IDENTICAL label. Within-game, within-seat label variance is exactly zero. But a
+beam layer only ever compares siblings — same game, same turn, same seat, one
+action apart — which is precisely that class. So val MSE, val CE and both rank
+metrics are computed entirely from two discriminations the search never makes:
+which seat of a decisive game this is, and decisive-vs-drawn. A net can climb
+every validation metric with zero improvement in sibling ordering.
+
+That explains all four reversals below without any harness bug. It is amplified
+by draws: 42-54% of labels are 0, and those are day-cap stalls of the HEURISTIC
+that generated the data, so the label says "an advantage greedy could not
+convert = dead even". More data means better calibration to greedy's stalls,
+which is better metrics and worse play for a searcher that can convert.
+
+**The mirror check proves determinism, not fairness.** `duel()` pins seed 1 and
+play is deterministic, so the two seat-swapped mirror games are the SAME
+trajectory, booked once as a win and once as a loss: 0.500 is guaranteed by
+construction. A harness giving seat 0 double income would still pass it. Also,
+with the seed fixed there is no combat-luck sampling anywhere in the benchmark,
+so the sampling unit is the MAP, not the match — per-match sigmas are optimistic.
+
 **Correction — Phase 4 does NOT pass. The pathology is in the search.**
 The wall-clock result below was measurement noise. Re-run with a deterministic
 node budget and a matched control, over an 8x range on 16 held-out maps:
@@ -122,6 +146,41 @@ This also **rules out fog self-blinding** as the cause. The steeper fog decline
 appears in the plain planner too, and `evaluatePosition` consumes `Belief` via
 `buildBeliefThreatMap` — a belief-blind encoder cannot explain degradation in an
 agent that is not belief-blind.
+
+**Tried: an opponent-reply veto. A real +0.065, but NOT the depth fix.**
+`opponentReplyActions` in `PlannerOptions` (default 0). The search expands only
+the acting player's moves — `topActions` filters `endTurn` out, so the turn
+never ends inside `plan()` and every leaf is a position where the enemy stood
+frozen while up to 24 of our moves piled up. Instrumentation
+(`tools/diag-depth.ts`) measured the consequence: promises are KEPT within the
+turn (reality beats them by ~700 funds), and the whole error opens after the
+opponent replies — +8092 funds at 200 nodes, +13156 at 1600, with clean
+dose-response in plan length (~0 for empty plans, +18-20k from length 4 up).
+Setting `opponentReplyActions: 8` removes 87% of that gap at 6.4 sigma.
+
+And it does not touch the win-rate slope:
+
+| evaluator | 200 -> 1600 | reply 0 | reply 8 |
+|---|---|---|---|
+| net | | 0.727 -> 0.656 | 0.797 -> 0.719 |
+| plain planner | | 0.492 -> 0.414 | 0.555 -> 0.477 |
+
+A pure level shift of +0.063 to +0.070, replicated in all four cells, with the
+slope unchanged (-0.078 everywhere). **Worth turning on for the strength**; the
+hand-priced planner beats greedy for the first time with it. But the frozen
+opponent is NOT what makes deeper search worse, and the depth pathology remains
+unexplained. Note the dissociation: a 6.4-sigma improvement in the funds
+diagnostic produced no slope change at all. Four separate offline metrics have
+now failed to predict match outcomes. Measure with matches.
+
+Also measured and NOT working: learned move ordering. A policy head trained on
+heuristic self-play is neutral at 200 nodes (0.609 vs 0.602) and COLLAPSES at
+1600 (0.320 vs 0.563; head-to-head 0.188, ~5 sigma). Two reasons, and the
+second is a wiring bug: a policy trained to imitate `HeuristicAgent` cannot beat
+`HeuristicAgent.scoreFor` at ordering, since it is a lossy copy of it; and
+`topActions` discards the policy's END_TURN mass, so deep in a turn — where
+stopping is usually right — the survivors are ranked by near-zero
+log-probabilities, i.e. noise.
 
 **Tried and did not work: a noise-scaled acceptance margin.** `selectionSigmas`
 in `PlannerOptions` makes a deeper plan beat the incumbent by k standard
