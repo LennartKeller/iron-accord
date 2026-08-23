@@ -64,15 +64,66 @@ interface TurnContext {
   dropOffs: Navigator;
 }
 
+/**
+ * How often, and how widely, the agent departs from its best move.
+ *
+ * Only for generating training data, and the reason is the whole difficulty
+ * with learning a value function here. This agent is deterministic, so from any
+ * position exactly ONE continuation is ever recorded: the data never says what
+ * would have happened after a different move. A value net trained on it cannot
+ * learn to tell sibling positions apart, because it has never seen a
+ * counterfactual — and sibling positions are the only thing a beam search ever
+ * compares. Measured on the shipped datasets: within-game, within-seat label
+ * variance is exactly zero.
+ *
+ * The dose matters. `--agents random,heuristic` was tried and made the net
+ * WORSE, because uniformly random play visits boards no competent player
+ * reaches, and a value learned there does not transfer. Sampling among the
+ * agent's own top few actions keeps the trajectory close to real play while
+ * making the same position resolve differently across games, which is what
+ * AlphaZero's temperature sampling buys and what this data has never had.
+ */
+export interface ExplorationOptions {
+  /** Chance of sampling instead of taking the best action. 0 is deterministic. */
+  epsilon: number;
+  /** How many of the top-scoring actions to sample among. */
+  topK: number;
+  /** Seed, so a generated game stays reproducible from its replay. */
+  seed: number;
+}
+
 export class HeuristicAgent implements Agent {
   readonly name: string;
   private readonly weights: HeuristicWeights;
   private context: TurnContext | null = null;
   private contextPlayer = -1;
+  private readonly exploration: ExplorationOptions | null;
+  private rngState: number;
 
-  constructor(weights: Partial<HeuristicWeights> = {}, name = 'heuristic') {
+  constructor(
+    weights: Partial<HeuristicWeights> = {},
+    name = 'heuristic',
+    exploration: ExplorationOptions | null = null,
+  ) {
     this.weights = { ...DEFAULT_WEIGHTS, ...weights };
     this.name = name;
+    this.exploration = exploration && exploration.epsilon > 0 ? exploration : null;
+    this.rngState = (exploration?.seed ?? 1) >>> 0 || 1;
+  }
+
+  /**
+   * Mulberry32, kept private to the agent.
+   *
+   * Deliberately NOT the shared script RNG: that one is rewound by `explore()`
+   * so deliberation cannot consume the game's luck, and drawing exploration
+   * from it would make the sampled move depend on how much the agent thought.
+   */
+  private random(): number {
+    this.rngState = (this.rngState + 0x6D2B79F5) >>> 0;
+    let t = this.rngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
   beginTurn(env: GameEnvironment): void {
@@ -117,16 +168,25 @@ export class HeuristicAgent implements Agent {
     if (legal.length === 0) return null;
     const context = this.ensureContext(env);
 
-    let best: ActionDescriptor | null = null;
-    let bestScore = 0;   // ending the turn scores zero, so only positives act
-
+    // Ending the turn scores zero, so only positive-scoring actions ever act.
+    const scored: Array<{ action: ActionDescriptor; score: number }> = [];
     for (const action of legal) {
       if (action.kind === 'endTurn') continue;
       const score = this.score(env, context, action);
-      if (score > bestScore) {
-        bestScore = score;
-        best = action;
-      }
+      if (score > 0) scored.push({ action, score });
+    }
+
+    let best: ActionDescriptor | null = null;
+    if (scored.length > 0) {
+      scored.sort((a, b) => b.score - a.score);
+      // Sampling among the top few, not among everything: the tail is full of
+      // actively bad moves, and playing those produces the off-distribution
+      // positions that made the random-agent slice hurt.
+      const sample = this.exploration
+        && scored.length > 1
+        && this.random() < this.exploration.epsilon;
+      const cut = sample ? Math.min(this.exploration!.topK, scored.length) : 1;
+      best = scored[sample ? Math.floor(this.random() * cut) : 0].action;
     }
 
     // Any action changes the board, so the cached view has to go.

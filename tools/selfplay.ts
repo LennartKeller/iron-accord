@@ -28,6 +28,17 @@ const out = arg('out', 'data/selfplay.jsonl');
 const agents = arg('agents', 'heuristic,heuristic').split(',');
 const fogName = arg('fog', 'mixed');
 const maxDays = Number(arg('maxDays', '30'));
+/**
+ * Exploration for the heuristic seats, for training data only.
+ *
+ * The agent is deterministic, so one position yields exactly one continuation
+ * and the data carries no counterfactual — which is why a value net trained on
+ * it cannot separate the sibling positions a beam search compares. Sampling
+ * among the agent's own top actions makes the same position resolve differently
+ * across games. Keep it small: uniformly random play was tried and hurt.
+ */
+const epsilon = Number(arg('epsilon', '0'));
+const topK = Number(arg('topK', '3'));
 // Leave a core for the OS and this process; oversubscribing slows everything.
 const workerCount = Math.max(1, Math.min(Number(arg('workers', '0')) || os.availableParallelism() - 2, games));
 
@@ -62,6 +73,8 @@ function* jobs(): Generator<Job> {
       fog: fogModes[Math.floor(i / MAPS.length) % fogModes.length],
       agents: seats,
       maxDays,
+      epsilon,
+      topK,
     };
   }
 }

@@ -205,7 +205,11 @@ export const DEFAULT_PLANNER_OPTIONS: PlannerOptions = {
   policyEndTurn: false,
   policyGreedyFloor: 0,
   policyMaxDepth: 0,
-  opponentReplyActions: 0,
+  // On by default: +0.065 win rate, replicated in all four cells of
+  // {net, hand-priced} x {200, 1600 nodes}, both fog modes. It is what finally
+  // lets the hand-priced planner beat the greedy agent. It does not flatten the
+  // depth slope -- see the option's own comment for that measurement.
+  opponentReplyActions: 8,
   position: DEFAULT_POSITION_WEIGHTS,
 };
 

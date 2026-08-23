@@ -28,6 +28,9 @@ export interface Job {
   fog: number;
   agents: string[];
   maxDays: number;
+  /** Exploration for the heuristic seats; 0 keeps the agent deterministic. */
+  epsilon?: number;
+  topK?: number;
 }
 
 export interface Replay {
@@ -53,10 +56,14 @@ const sources = new Map<string, ReturnType<typeof readMap>>();
  * the slice adds no diversity at all — the exact failure the wider map pool is
  * meant to fix. Derived from the job seed, so a job still reproduces exactly.
  */
-function agentFor(name: string, seed: number): Agent {
+function agentFor(name: string, seed: number, job: Job): Agent {
   if (name === 'planner') return new PlannerAgent({ timeBudgetMs: 150 });
   if (name === 'random') return new RandomAgent(seed);
-  return new HeuristicAgent();
+  // Exploration is seeded from the job so a generated game stays reproducible.
+  const epsilon = job.epsilon ?? 0;
+  return new HeuristicAgent({}, 'heuristic', epsilon > 0
+    ? { epsilon, topK: job.topK ?? 3, seed }
+    : null);
 }
 
 async function play(job: Job): Promise<Replay> {
@@ -77,7 +84,7 @@ async function play(job: Job): Promise<Replay> {
   const actions: Replay['actions'] = [];
   const started = Date.now();
   const result = await playMatch(env, job.agents.map(
-    (name, seat) => agentFor(name, job.seed * 31 + seat + 1)), {
+    (name, seat) => agentFor(name, job.seed * 31 + seat + 1, job)), {
     maxSteps: 8000,
     onStep: (_step, action, player) => { actions.push({ player, action }); },
   });
