@@ -46,6 +46,16 @@ def parse_args():
                         'replaces the greedy scorer in PlannerAgent.topActions -- '
                         'today the net only ever reorders a shortlist the hand '
                         'evaluation chose.')
+    p.add_argument('--policy-trunk', choices=['shared', 'separate'], default='shared',
+                   help="'shared' puts the policy head on the value trunk, which "
+                        "is cheap and fixed the scalar shortcut (trunk share went "
+                        "from -87%% to 63%%). It may also be why policy-guided "
+                        "search collapses at depth: proposal and evaluation then "
+                        "fail together, so the beam compounds correlated error "
+                        "instead of checking it -- policy-ordered turns lose ~6890 "
+                        "funds where greedy-ordered ones gain ~4516. 'separate' "
+                        "gives the policy its own trunk to test that: an "
+                        "independent proposer should not degrade.")
     p.add_argument('--policy-weight', type=float, default=0.15,
                    help='weight of the policy loss against the value loss. The '
                         'two are not on the same scale: policy cross-entropy '
@@ -116,6 +126,12 @@ class Shards:
                                if os.path.exists(f'{stem}.actiontype.i16') else None),
                 'actionTile': (np.fromfile(f'{stem}.actiontile.i32', dtype=np.int32)
                                if os.path.exists(f'{stem}.actiontile.i32') else None),
+                # Needed for the pair metric: which game a position came from and
+                # how far into it. See pair_accuracy().
+                'games': (np.fromfile(f'{stem}.games.u32', dtype=np.uint32)
+                          if os.path.exists(f'{stem}.games.u32') else None),
+                'plies': (np.fromfile(f'{stem}.plies.u32', dtype=np.uint32)
+                          if os.path.exists(f'{stem}.plies.u32') else None),
                 'baseline': np.fromfile(f'{stem}.baseline.f32', dtype=np.float32),
                 'n': n, 'h': h, 'w': w, 'map': shard['map'],
             }
@@ -153,6 +169,8 @@ class Shards:
             scalars = torch.from_numpy(e['scalars'][idx])
             labels = torch.from_numpy(e['labels'][idx])
             base = torch.from_numpy(e['baseline'][idx])
+            ident = (None if e['games'] is None
+                     else (e['games'][idx].astype(np.int64), e['plies'][idx].astype(np.int64)))
             if e['actionType'] is None:
                 policy = None
             else:
@@ -172,7 +190,7 @@ class Shards:
                     kinds, tiles = policy
                     moved, _, _ = move_tile(tiles, e['h'], e['w'], k, flip)
                     policy = (kinds, moved)
-            yield planes, scalars, labels, base, si, policy
+            yield planes, scalars, labels, base, si, policy, ident
 
 
 def move_tile(tile, height, width, k, flip):
@@ -229,7 +247,7 @@ class ValueNet(nn.Module):
     """
 
     def __init__(self, spec, width=64, blocks=6, mode='embed', scalars=5, norm='group',
-                 head='wdl', actions=0):
+                 head='wdl', actions=0, policy_trunk='shared'):
         super().__init__()
         self.mode = mode
         self.head_kind = head
@@ -262,6 +280,15 @@ class ValueNet(nn.Module):
             nn.Linear(128, 64), nn.ReLU(inplace=True),
             nn.Linear(64, 3 if head == 'wdl' else 1))
         if actions:
+            # A separate trunk is a second stem plus blocks, so the policy never
+            # sees the value head's features and their errors stay independent.
+            self.policy_trunk = None
+            if policy_trunk == 'separate':
+                self.policy_stem = nn.Sequential(
+                    nn.Conv2d(in_channels, width, 3, padding=1, bias=False),
+                    norm_layer(norm, width), nn.ReLU(inplace=True))
+                self.policy_trunk = nn.Sequential(
+                    *[Block(width, norm) for _ in range(blocks)])
             # actions - 1 spatial planes; the last slot is END_TURN.
             self.policy_conv = nn.Sequential(
                 nn.Conv2d(width, width, 3, padding=1, bias=False),
@@ -303,8 +330,57 @@ class ValueNet(nn.Module):
             return value
         # (N, A-1, H, W) flattened to one row per position, END_TURN appended, so
         # the whole turn's choice is a single softmax the search can sample from.
-        spatial = self.policy_conv(x).flatten(1)
-        return value, torch.cat([spatial, self.policy_end(pooled)], dim=1)
+        px, ppooled = x, pooled
+        if self.policy_trunk is not None:
+            px = self.policy_trunk(self.policy_stem(self.features(planes)))
+            ppooled = torch.cat([
+                F.adaptive_avg_pool2d(px, 1).flatten(1),
+                F.adaptive_max_pool2d(px, 1).flatten(1),
+                scalars], dim=1)
+        spatial = self.policy_conv(px).flatten(1)
+        return value, torch.cat([spatial, self.policy_end(ppooled)], dim=1)
+
+
+def pair_accuracy(scores, labels, games, plies, window=12):
+    """
+    How often the scorer puts the eventual winner's board above the loser's,
+    over pairs from the SAME game a few plies apart.
+
+    The metric this replaces cannot work. `outcomeFor` never reads the board, so
+    every position one seat faced in one game carries an identical label: label
+    variance within a game AND seat is exactly zero. MSE, cross-entropy and rank
+    are therefore computed entirely from "which seat of a decisive game is this"
+    and "was it a draw" -- neither of which a beam search ever asks, since a beam
+    layer compares positions from one game, one turn, one seat.
+
+    Pairing across seats inside one game at least holds the map, the game and
+    roughly the day fixed, so what is left is the board. It is not the sibling
+    comparison itself -- that needs children of one decision point, which the
+    extractor does not record -- but it has real variance in the right direction,
+    and the hand-priced evaluation scores 0.862 on it, so it discriminates.
+
+    0.5 is chance.
+    """
+    right = total = 0
+    order = np.lexsort((plies, games))
+    gs, ps, ls, ss = games[order], plies[order], labels[order], scores[order]
+    start = 0
+    for end in range(1, len(gs) + 1):
+        if end < len(gs) and gs[end] == gs[start]:
+            continue
+        # One game's positions, in ply order.
+        for i in range(start, end):
+            for j in range(i + 1, end):
+                if ps[j] - ps[i] > window:
+                    break
+                if ls[i] == ls[j]:
+                    continue          # same seat, or both drawn: no signal
+                total += 1
+                hi, lo = (i, j) if ls[i] > ls[j] else (j, i)
+                if ss[hi] > ss[lo]:
+                    right += 1
+        start = end
+    return (right / total if total else float('nan')), total
 
 
 def policy_target(kinds, tiles, actions, cells):
@@ -375,9 +451,9 @@ def spearman(a, b):
 def evaluate(model, shards, args, rng):
     model.eval()
     preds, labels, bases, logits, blank = [], [], [], [], []
-    shard_ids = []
+    shard_ids, all_games, all_plies = [], [], []
     policy_right = policy_seen = 0
-    for planes, scalars, y, base, si, policy in shards.batches(
+    for planes, scalars, y, base, si, policy, ident in shards.batches(
             args.batch, rng, augment=0, max_per_shard=args.val_per_shard):
         planes = planes.to(args.device)
         scalars = scalars.to(args.device)
@@ -409,6 +485,10 @@ def evaluate(model, shards, args, rng):
         labels.append(y.numpy())
         bases.append(base.numpy())
         shard_ids.append(np.full(len(y), si))
+        if ident is not None:
+            # Namespaced by shard so two shards' game 0 never pair together.
+            all_games.append(ident[0] + si * 1_000_000)
+            all_plies.append(ident[1])
     model.train()
     preds = np.concatenate(preds); labels = np.concatenate(labels); bases = np.concatenate(bases)
     shard_ids = np.concatenate(shard_ids)
@@ -440,6 +520,14 @@ def evaluate(model, shards, args, rng):
         'maps_scored': len(per_map_net),
         'n': len(labels),
     }
+    if all_games:
+        acc, pairs = pair_accuracy(preds, labels,
+                                   np.concatenate(all_games), np.concatenate(all_plies))
+        stats['pair_acc'] = acc
+        stats['pair_n'] = pairs
+        base_acc, _ = pair_accuracy(bases, labels,
+                                    np.concatenate(all_games), np.concatenate(all_plies))
+        stats['pair_acc_baseline'] = base_acc
     if policy_seen:
         # Share of positions where the policy's top choice is the move actually
         # played. This is what decides whether it can replace topActions.
@@ -488,9 +576,10 @@ def main():
     if args.policy and not actions:
         print('no action targets in this dataset -- policy head disabled')
     model = ValueNet(manifest, args.width, args.blocks, args.input, scalars,
-                     args.norm, args.head, actions).to(args.device)
+                     args.norm, args.head, actions, args.policy_trunk).to(args.device)
     params = sum(p.numel() for p in model.parameters())
-    print(f"model: {args.head} head{f' + policy ({actions} actions)' if actions else ''}, "
+    print(f"model: {args.head} head"
+          f"{f' + {args.policy_trunk}-trunk policy ({actions} actions)' if actions else ''}, "
           f"{args.input}/{args.norm}, {args.blocks} blocks x "
           f"{args.width} ch, {params/1e3:.0f}k params, device {args.device}")
 
@@ -536,7 +625,7 @@ def main():
         started = time.time()
         running, seen = 0.0, 0
         running_value, running_policy = 0.0, 0.0
-        for planes, scalars_b, y, _, _shard, policy in train.batches(
+        for planes, scalars_b, y, _, _shard, policy, _ident in train.batches(
                 args.batch, rng, args.augment):
             planes = planes.to(args.device)
             scalars_b = scalars_b.to(args.device)
@@ -592,6 +681,9 @@ def main():
         if args.head == 'wdl':
             share = stats['trunk_share']
             line += ('trunk n/a  ' if share != share else f"trunk {share*100:.0f}%  ")
+        if 'pair_acc' in stats:
+            line += (f"pair {stats['pair_acc']*100:.1f}% vs "
+                     f"{stats['pair_acc_baseline']*100:.1f}%  ")
         if 'policy_top1' in stats:
             line += f"policy top1 {stats['policy_top1']*100:.1f}%  "
         line += f"{time.time()-started:.0f}s"
@@ -627,6 +719,9 @@ def main():
                 })
             if 'policy_top1' in stats:
                 payload['val/policy_top1'] = stats['policy_top1']
+            if 'pair_acc' in stats:
+                payload['val/pair_acc'] = stats['pair_acc']
+                payload['val/pair_acc_baseline'] = stats['pair_acc_baseline']
             run.log(payload, step=step)
 
         # Three checkpoints, because no single validation metric here predicts

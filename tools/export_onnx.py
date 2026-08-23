@@ -72,7 +72,8 @@ def main():
         actions = 0
     model = ValueNet(spec, trained['width'], trained['blocks'], trained['input'],
                      scalars=len(spec['scalarNames']), norm=trained.get('norm', 'group'),
-                     head=head, actions=actions)
+                     head=head, actions=actions,
+                     policy_trunk=trained.get('policy_trunk', 'shared'))
     model.load_state_dict(ckpt['model'])
     model.eval()
     wrapper = ExportWrapper(model, head).eval()
