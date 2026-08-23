@@ -7,7 +7,7 @@ import { assetFileName } from '../src/cw/assetname.ts';
 import { bootstrapBrowser } from '../src/game/bootstrap.browser.ts';
 import { gameMapFromScene } from '../src/game/fromscene.ts';
 import { resolveBuildingSprites, resolveUnitSprites } from '../src/maps/loadmap.ts';
-import { Game, fogViewerIndex, type ActionStep } from '../src/game/game.ts';
+import { Game, fogViewerIndex, nextObserverSeat, type ActionStep } from '../src/game/game.ts';
 import { describeVictoryRules, type VictoryRuleInfo } from '../src/game/victory.ts';
 import { threatenedTiles } from '../src/game/threat.ts';
 import {
@@ -126,11 +126,33 @@ const PLAYER_COLORS = ['#ff6b4a', '#58a6ff', '#3fb950', '#d29922', '#bc8cff', '#
 const playerColor = (index: number) => PLAYER_COLORS[index % PLAYER_COLORS.length];
 
 /**
+ * Observer choice, only offered when every seat is an AI.
+ *
+ * `null` means omniscient — draw the board with no fog at all. A number locks
+ * the view to that seat's knowledge. Watching an AI-vs-AI game under the
+ * *current* seat's fog is the one thing that is never useful: the view flips
+ * every turn, so nothing on screen is comparable to what was there a moment ago.
+ * Omniscient is the default because it is what studying a game wants; locking to
+ * a seat answers the different question of what that AI could actually see when
+ * it made a choice.
+ */
+let observerSeat: number | null = null;
+
+/** True when nobody is playing — the only case where an observer view applies. */
+function isSpectating(): boolean {
+  return !!config && config.seats.every(seat => seat.controller === 'ai');
+}
+
+/**
  * Whose fog the board is drawn under. Not simply the current player: while an
  * AI seat plays, its view would print everything the machine knows — its own
  * hidden units included — onto the watching human's screen (fogViewerIndex).
  */
 function fogViewer() {
+  if (isSpectating()) {
+    if (observerSeat === null) return null;   // omniscient
+    return game!.map.players[observerSeat] ?? null;
+  }
   const seat = fogViewerIndex(
     game!.currentPlayerIndex,
     game!.map.players.length,
@@ -138,6 +160,22 @@ function fogViewer() {
     index => game!.map.players[index]?.isDefeated ?? true,
   );
   return game!.map.players[seat] ?? game!.currentPlayer;
+}
+
+/** Cycles omniscient -> seat 0 -> seat 1 -> ... -> omniscient. */
+function cycleObserver(): void {
+  if (!isSpectating() || !game) return;
+  observerSeat = nextObserverSeat(
+    observerSeat,
+    game.map.players.length,
+    seat => game!.map.players[seat]?.isDefeated ?? true,
+  );
+  syncUnits();
+  syncBuildings();
+  statusEl.textContent = observerSeat === null
+    ? 'Observing: omniscient · V to change'
+    : `Observing: player ${observerSeat + 1}'s view · V to change`;
+  requestRender();
 }
 
 /**
@@ -155,7 +193,9 @@ function syncBuildings(): void {
       const building = game.map.getTerrain(x, y).getBuilding();
       if (!building) continue;
       // A shrouded tile shows nothing at all; fogged tiles still show terrain.
-      if (fogEnabled() && viewer.getFieldVisibleType(x, y) === GameEnums.VisionType_Shrouded) continue;
+      // A null viewer is the omniscient observer, which is shrouded nowhere.
+      if (fogEnabled() && viewer
+          && viewer.getFieldVisibleType(x, y) === GameEnums.VisionType_Shrouded) continue;
 
       const ownerId = building.getOwnerID();
       const table = ownerId >= 0 ? scene.players[ownerId]?.colorTable : undefined;
@@ -179,8 +219,9 @@ function syncUnits(): void {
 
   const viewer = fogViewer();
   renderer.liveUnits = game.map.units
-    // Under fog a unit is only drawn where its tile is actually visible.
-    .filter(unit => !fogEnabled() || viewer.getFieldVisible(unit.x, unit.y))
+    // Under fog a unit is only drawn where its tile is actually visible. The
+    // omniscient observer (null viewer) sees every unit, which is the point.
+    .filter(unit => !fogEnabled() || !viewer || viewer.getFieldVisible(unit.x, unit.y))
     .map(unit => {
       const table = scene!.players[unit.getOwner().getPlayerID()]?.colorTable;
       return {
@@ -194,7 +235,7 @@ function syncUnits(): void {
         badges: badgesFor(unit),
       };
     });
-  renderer.fog = fogEnabled() ? game.map.vision.gridFor(viewer) : null;
+  renderer.fog = fogEnabled() && viewer ? game.map.vision.gridFor(viewer) : null;
 }
 
 /**
@@ -748,6 +789,7 @@ window.addEventListener('keydown', event => {
   // Ignore keys typed into the map search box.
   if (event.target instanceof HTMLInputElement) return;
   if (event.key === 'n' || event.key === 'N') { cycleToNextUnit(); event.preventDefault(); }
+  if (event.key === 'v' || event.key === 'V') { cycleObserver(); event.preventDefault(); }
 });
 
 // --- game over ------------------------------------------------------------
@@ -804,7 +846,10 @@ async function loadScene(id: string): Promise<void> {
   syncTurn();
 
   titleEl.textContent = `${scene!.name}${scene!.author ? ` — ${scene!.author}` : ''}`;
-  statusEl.textContent = `${scene!.width}×${scene!.height} · ${scene!.players.length}P`;
+  statusEl.textContent = isSpectating()
+    // Otherwise the mode is invisible: an all-AI game just looks like a game.
+    ? `${scene!.width}×${scene!.height} · ${scene!.players.length}P · observing (omniscient), V to change`
+    : `${scene!.width}×${scene!.height} · ${scene!.players.length}P`;
 
   // Debug affordances: ?select=x,y picks a unit up and ?to=x,y walks it to a
   // destination and opens the action menu, so any board state is reproducible
@@ -1165,6 +1210,9 @@ $('#setupStart').addEventListener('click', () => {
   setupDraft.victoryRules = readVictoryRules();
   // Clamp in the model too: the form is not the only way in.
   config = sanitizeConfig(setupDraft);
+  // A fresh game starts omniscient; the previous game's choice should not
+  // silently carry over into one with different seats.
+  observerSeat = null;
   currentMapId = pendingMap.id;
   setup.close();
   void loadScene(pendingMap.id);

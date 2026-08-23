@@ -5,7 +5,7 @@ import { readMap } from '../src/maps/mapreader.ts';
 import { loadIntoGameMap } from '../src/maps/loadmap.ts';
 import { bootstrap } from '../src/game/bootstrap.node.ts';
 import { cwRoot } from '../src/cw/resources.node.ts';
-import { Game, fogViewerIndex } from '../src/game/game.ts';
+import { Game, fogViewerIndex, nextObserverSeat } from '../src/game/game.ts';
 import type { GameMap } from '../src/host/index.ts';
 
 const { registry, animations } = bootstrap();
@@ -107,5 +107,26 @@ describe('fog viewer seat', () => {
   it('skips defeated humans and spectates all-AI games as the current seat', () => {
     expect(fogViewerIndex(2, 3, human(0, 1), seat => seat === 1)).toBe(0);
     expect(fogViewerIndex(1, 2, () => false, nobodyDefeated)).toBe(1);
+  });
+});
+
+describe('observer view', () => {
+  const alive = () => false;
+
+  it('cycles omniscient through every living seat and back', () => {
+    expect(nextObserverSeat(null, 2, alive)).toBe(0);
+    expect(nextObserverSeat(0, 2, alive)).toBe(1);
+    expect(nextObserverSeat(1, 2, alive)).toBe(null);
+  });
+
+  it('skips defeated seats, whose vision has stopped updating', () => {
+    const defeated = (seat: number) => seat === 1;
+    expect(nextObserverSeat(null, 3, defeated)).toBe(0);
+    expect(nextObserverSeat(0, 3, defeated)).toBe(2);
+    expect(nextObserverSeat(2, 3, defeated)).toBe(null);
+  });
+
+  it('stays omniscient when every seat is defeated', () => {
+    expect(nextObserverSeat(null, 2, () => true)).toBe(null);
   });
 });

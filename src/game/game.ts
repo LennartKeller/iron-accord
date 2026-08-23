@@ -816,6 +816,26 @@ export class Game {
  * living human seat (an all-AI spectate) the current player's view is the
  * only sensible one left.
  */
+/**
+ * The next observer view when spectating an all-AI game.
+ *
+ * `null` is omniscient — no fog at all — and the cycle runs omniscient, then
+ * each living seat, then back. Defeated seats are skipped: their vision stops
+ * updating, so locking to one shows a board frozen at the moment they died.
+ * Pure so it can be tested without a DOM, like `fogViewerIndex`.
+ */
+export function nextObserverSeat(
+  current: number | null,
+  seatCount: number,
+  isDefeated: (seat: number) => boolean,
+): number | null {
+  if (seatCount <= 0) return null;
+  for (let seat = current === null ? 0 : current + 1; seat < seatCount; seat++) {
+    if (!isDefeated(seat)) return seat;
+  }
+  return null;
+}
+
 export function fogViewerIndex(
   currentIndex: number,
   seatCount: number,
