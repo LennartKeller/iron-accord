@@ -312,8 +312,13 @@ export class ValueNetPolicy implements PolicyOrdering<PackedPosition> {
       const row = rows[i];
       // An action the vocabulary cannot name keeps last place rather than a
       // score of zero, which would outrank every real log-probability.
+      // endTurn is the row's final scalar slot (train_value.py appends it
+      // after the (actions-1) x cells spatial block); the planner only sends
+      // it here when PlannerOptions.policyEndTurn is on.
       return entry.actions.map(action => {
-        const slot = this.slot(action, width, cells);
+        const slot = action.kind === 'endTurn'
+          ? row.length - 1
+          : this.slot(action, width, cells);
         return slot >= 0 && slot < row.length ? Number(row[slot]) : -Infinity;
       });
     });

@@ -41,6 +41,27 @@ const budget = Number(process.env.BUDGET_MS ?? 250);
 const nodeBudget = Number(process.env.NODES ?? 0);
 /** Winner's-curse guard; see PlannerOptions.selectionSigmas. 0 is the old argmax. */
 const selectionSigmas = Number(process.env.SIGMAS ?? 0);
+/**
+ * REPLY=N re-scores an adopted plan after N greedy opponent actions.
+ *
+ * The search expands only the acting player's moves, so a deep plan is scored
+ * against a frozen enemy and overpromises by ~13k funds once the opponent
+ * actually replies — measured, and the single depth-dependent pathology
+ * instrumentation found. See PlannerOptions.opponentReplyActions.
+ */
+const replyActions = Number(process.env.REPLY ?? 0);
+/**
+ * The policy-ordering repair options, for A/B-ing the 1600-node collapse
+ * (policy+net v net alone fell to 0.188 at 1600 nodes while neutral at 200).
+ * POLICY_ENDTURN=1 lets the policy's END_TURN ranking truncate a frame's
+ * expansion; POLICY_FLOOR=p falls back to greedy ordering when the best
+ * candidate's probability is below p; POLICY_MAXDEPTH=n limits the policy to
+ * the first n beam layers, greedy beyond. See the PlannerOptions doc comments
+ * for what tools/diag-policy-endturn.ts measured about each.
+ */
+const policyEndTurn = Number(process.env.POLICY_ENDTURN ?? 0) > 0;
+const policyGreedyFloor = Number(process.env.POLICY_FLOOR ?? 0);
+const policyMaxDepth = Number(process.env.POLICY_MAXDEPTH ?? 0);
 const modelPath = process.env.MODEL_A ?? process.env.MODEL ?? 'models/value.onnx';
 const evaluator = await loadValueNet(modelPath);
 /** Optional second model, for a head-to-head between two trained nets. */
@@ -93,7 +114,8 @@ function evaluatorFor(side: Side): Evaluator<unknown> | undefined {
 function agentFor(side: Side) {
   if (side === 'greedy') return new HeuristicAgent();
   return new PlannerAgent({
-    timeBudgetMs: budget, nodeBudget, selectionSigmas,
+    timeBudgetMs: budget, nodeBudget, selectionSigmas, opponentReplyActions: replyActions,
+    policyEndTurn, policyGreedyFloor, policyMaxDepth,
     evaluator: evaluatorFor(side === 'policy' ? 'budgeted' : side),
     policy: side === 'policy' ? policy ?? undefined : undefined,
   });
@@ -188,7 +210,8 @@ const fogs = [GameEnums.Fog_Off, GameEnums.Fog_OfWar];
 
 console.log(`model A ${modelPath}${modelPathB ? `\nmodel B ${modelPathB}` : ''}`);
 console.log(`${nodeBudget > 0 ? `${nodeBudget} nodes/turn (reproducible)` : `${budget}ms/turn (load-dependent)`}` +
-  `, maxPerLayer ${maxPerLayer}, sigmas ${selectionSigmas}, ${maps.length} maps, both fog modes\n`);
+  `, maxPerLayer ${maxPerLayer}, sigmas ${selectionSigmas}, reply ${replyActions}, ` +
+  `${maps.length} maps, both fog modes\n`);
 
 // Trap 3 from the handoff: if a mirror duel is not exactly 0.500 the harness is
 // biased and nothing below it means anything.
@@ -198,17 +221,28 @@ if (Math.abs(mirror - 0.5) > 1e-9) {
   process.exit(1);
 }
 
+/**
+ * ONLY=policy runs just the mirror check and the two policy series; ONLY=h2h
+ * narrows further to the mirror and the head-to-head. An A/B of a
+ * move-ordering option leaves the net-alone and plain-planner baselines
+ * untouched — nothing in those agents reads the ordering options — and at
+ * 1600 nodes each skipped series costs hours of machine time. The mirror
+ * always runs: it is the harness bias check everything else rests on.
+ */
+const onlyPolicy = process.env.ONLY === 'policy' || process.env.ONLY === 'h2h';
+const onlyH2h = process.env.ONLY === 'h2h';
+
 console.log('');
-await series('A: net v greedy', 'budgeted', 'greedy', maps, fogs);
-if (evaluatorB) {
+if (!onlyPolicy) await series('A: net v greedy', 'budgeted', 'greedy', maps, fogs);
+if (evaluatorB && !onlyPolicy) {
   await series('B: net v greedy', 'budgetedB', 'greedy', maps, fogs);
   // The head-to-head. Rate is from A's point of view: above 0.500 means A wins.
   await series('A v B (head to head)', 'budgeted', 'budgetedB', maps, fogs);
 }
 if (policy) {
-  await series('policy+net v greedy', 'policy', 'greedy', maps, fogs);
+  if (!onlyH2h) await series('policy+net v greedy', 'policy', 'greedy', maps, fogs);
   // The one comparison that isolates move ordering: same evaluator, same
   // budget, the only difference being who chooses what to search.
   await series('policy+net v net alone', 'policy', 'budgeted', maps, fogs);
 }
-await series('plain planner v greedy', 'plain', 'greedy', maps, fogs);
+if (!onlyPolicy) await series('plain planner v greedy', 'plain', 'greedy', maps, fogs);
