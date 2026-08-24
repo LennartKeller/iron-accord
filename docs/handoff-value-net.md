@@ -122,7 +122,34 @@ construction. A harness giving seat 0 double income would still pass it. Also,
 with the seed fixed there is no combat-luck sampling anywhere in the benchmark,
 so the sampling unit is the MAP, not the match — per-match sigmas are optimistic.
 
-**Correction — Phase 4 does NOT pass. The pathology is in the search.**
+**RESOLVED — Phase 4 passes, and the fix was the training data.** A net trained
+on epsilon-greedy self-play gains with depth where every previous configuration
+lost. Same run, same maps, same seats, same fog, same reply setting; the
+evaluator is the only variable:
+
+| 200 -> 1600 nodes | slope |
+|---|---|
+| plain planner (hand-priced) | 0.555 -> 0.477 = **-0.078** |
+| net on epsilon-greedy data | 0.844 -> **0.883** = **+0.039** |
+
+Difference-in-differences +0.117 (~1.4 sigma, so confirm before treating as
+fact) -- but the control reproduces its -0.078 to three decimals for the fifth
+time, so the contrast is not harness drift.
+
+Why the data and not the search: deterministic self-play records exactly ONE
+continuation per position, so the data never says what a different move would
+have led to. Sampling among the agent's own top actions (`--epsilon`) supplies
+the counterfactual while staying near real play. Measured: at epsilon 0, four of
+twelve map/fog groups produce the same winner every time; at 0.15, none do. The
+resulting net beats the previous best **0.750 head to head** (5.2 sigma) and
+0.836 vs 0.734 against greedy.
+
+This also explains why every attempt to fix the pathology IN THE SEARCH failed
+(winner's curse margin, plan brittleness, frozen opponent, discarded stop-mass,
+shared-vs-separate policy trunk -- six hypotheses, all dead). The search was
+never the problem.
+
+**Superseded — the reasoning that said the pathology was in the search.**
 The wall-clock result below was measurement noise. Re-run with a deterministic
 node budget and a matched control, over an 8x range on 16 held-out maps:
 

@@ -25,6 +25,7 @@ import { bootstrap } from '../src/game/bootstrap.node.ts';
 import { cwRoot } from '../src/cw/resources.node.ts';
 import { Game } from '../src/game/game.ts';
 import { GameEnvironment, HeuristicAgent, PlannerAgent, HeuristicEvaluator, playMatch } from '../src/ai/index.ts';
+import { DEFAULT_PLANNER_OPTIONS } from '../src/ai/planner.ts';
 import { BudgetedValueNet, ValueNetPolicy } from '../src/ai/onnx-evaluator.ts';
 import fsSync from 'node:fs';
 import { loadValueNet } from '../src/ai/valuenet.node.ts';
@@ -49,7 +50,7 @@ const selectionSigmas = Number(process.env.SIGMAS ?? 0);
  * actually replies — measured, and the single depth-dependent pathology
  * instrumentation found. See PlannerOptions.opponentReplyActions.
  */
-const replyActions = Number(process.env.REPLY ?? 0);
+const replyActions = Number(process.env.REPLY ?? DEFAULT_PLANNER_OPTIONS.opponentReplyActions);
 /**
  * The policy-ordering repair options, for A/B-ing the 1600-node collapse
  * (policy+net v net alone fell to 0.188 at 1600 nodes while neutral at 200).
