@@ -1,4 +1,5 @@
 import type { GameMap, Unit } from '../host/index.ts';
+import { BucketQueue, assertIntegerCost } from './bucketqueue.ts';
 
 /**
  * Movement range and routing for a single unit.
@@ -29,6 +30,14 @@ export interface MovementRange {
   tiles: Map<string, ReachableTile>;
   /** Predecessor per tile, for path reconstruction. */
   from: Map<string, string>;
+  /**
+   * The search's own arrays, kept so `pathTo` need not walk string keys.
+   *
+   * `from` and `tiles` stay because callers outside this file read them, but
+   * reconstructing a route through them costs a string and two hash lookups per
+   * step, and the AI reconstructs routes constantly.
+   */
+  raw: { cost: Int32Array; cameFrom: Int32Array; width: number };
 }
 
 export const key = (x: number, y: number): string => `${x},${y}`;
@@ -46,24 +55,37 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number]> = [
  */
 export function computeMovementRange(map: GameMap, unit: Unit): MovementRange {
   const budget = unit.getMovementpoints();
-  const tiles = new Map<string, ReachableTile>();
-  const from = new Map<string, string>();
+  const width = map.width;
 
-  const start = key(unit.x, unit.y);
-  tiles.set(start, { x: unit.x, y: unit.y, cost: 0, canStop: true, canAct: true });
+  // Flat arrays during the search; the string-keyed Maps are built once at the
+  // end. Keying tiles by `${x},${y}` while relaxing meant a fresh string and a
+  // hash lookup per edge, which with the frontier sort made this one of the
+  // hottest paths in self-play.
+  const cost = new Int32Array(width * map.height).fill(-1);
+  const cameFrom = new Int32Array(width * map.height).fill(-1);
+  const canStop = new Uint8Array(width * map.height);
+  // First-insertion order, which the Maps below must preserve: their iteration
+  // order reaches action enumeration, so changing it changes which move an
+  // agent picks between equal options — and every recorded replay with it.
+  const reached: number[] = [];
 
-  // Small ranges make a sorted frontier cheaper than a real heap here.
-  const frontier: Array<{ x: number; y: number; cost: number }> = [{ x: unit.x, y: unit.y, cost: 0 }];
+  const startIndex = unit.y * width + unit.x;
+  cost[startIndex] = 0;
+  canStop[startIndex] = 1;
+  reached.push(startIndex);
 
-  while (frontier.length > 0) {
-    frontier.sort((a, b) => a.cost - b.cost);
-    const current = frontier.shift()!;
-    const currentKey = key(current.x, current.y);
-    if (current.cost > (tiles.get(currentKey)?.cost ?? Infinity)) continue;
+  const frontier = new BucketQueue();
+  frontier.push(startIndex, 0);
+
+  while (frontier.size > 0) {
+    const index = frontier.pop();
+    const cy = (index / width) | 0;
+    const cx = index - cy * width;
+    const currentCost = cost[index];
 
     for (const [dx, dy] of NEIGHBOURS) {
-      const x = current.x + dx;
-      const y = current.y + dy;
+      const x = cx + dx;
+      const y = cy + dy;
       if (!map.onMap(x, y)) continue;
 
       const occupant = map.getUnitAt(x, y);
@@ -77,24 +99,39 @@ export function computeMovementRange(map: GameMap, unit: Unit): MovementRange {
         if (blocks) continue;
       }
 
-      const step = unit.getMovementCosts(x, y, current.x, current.y);
+      const step = unit.getMovementCosts(x, y, cx, cy);
       if (step < 0) continue; // impassable for this movement type
+      assertIntegerCost(step, x, y);
 
-      const cost = current.cost + step;
-      if (cost > budget) continue;
+      const next = currentCost + step;
+      if (next > budget) continue;
 
-      const tileKey = key(x, y);
-      const existing = tiles.get(tileKey);
-      if (existing && existing.cost <= cost) continue;
+      const at = y * width + x;
+      const existing = cost[at];
+      if (existing >= 0 && existing <= next) continue;
 
-      const free = occupant === null || occupant === unit;
-      tiles.set(tileKey, { x, y, cost, canStop: free, canAct: true });
-      from.set(tileKey, currentKey);
-      frontier.push({ x, y, cost });
+      if (existing < 0) reached.push(at);
+      cost[at] = next;
+      cameFrom[at] = index;
+      canStop[at] = occupant === null || occupant === unit ? 1 : 0;
+      frontier.push(at, next);
     }
   }
 
-  return { tiles, from };
+  const tiles = new Map<string, ReachableTile>();
+  const from = new Map<string, string>();
+  for (const index of reached) {
+    const y = (index / width) | 0;
+    const x = index - y * width;
+    tiles.set(key(x, y), { x, y, cost: cost[index], canStop: canStop[index] === 1, canAct: true });
+    const previous = cameFrom[index];
+    if (previous >= 0) {
+      const py = (previous / width) | 0;
+      from.set(key(x, y), key(previous - py * width, py));
+    }
+  }
+
+  return { tiles, from, raw: { cost, cameFrom, width } };
 }
 
 /** Tiles the unit may actually finish its move on. */
@@ -109,16 +146,19 @@ export function actionableTiles(range: MovementRange): ReachableTile[] {
 
 /** Reconstructs the route to a destination, starting at the unit's own tile. */
 export function pathTo(range: MovementRange, x: number, y: number): ReachableTile[] {
-  const target = range.tiles.get(key(x, y));
-  if (!target) return [];
+  const { cost, cameFrom, width } = range.raw;
+  let cursor = y * width + x;
+  if (cursor < 0 || cursor >= cost.length || cost[cursor] < 0) return [];
 
+  // Walks the predecessor array and reads each tile out of `tiles` once, rather
+  // than rebuilding a `${x},${y}` key for every step of every route.
   const path: ReachableTile[] = [];
-  let cursor: string | undefined = key(x, y);
-  while (cursor) {
-    const tile = range.tiles.get(cursor);
+  while (cursor >= 0) {
+    const cy = (cursor / width) | 0;
+    const tile = range.tiles.get(key(cursor - cy * width, cy));
     if (!tile) break;
     path.push(tile);
-    cursor = range.from.get(cursor);
+    cursor = cameFrom[cursor];
   }
   return path.reverse();
 }

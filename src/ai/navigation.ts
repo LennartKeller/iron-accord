@@ -1,4 +1,5 @@
 import type { GameMap, Unit } from '../host/index.ts';
+import { BucketQueue, assertIntegerCost } from '../game/bucketqueue.ts';
 
 export const UNREACHABLE = Number.POSITIVE_INFINITY;
 
@@ -24,31 +25,39 @@ export function distanceField(
   const field = new Float64Array(map.width * map.height).fill(UNREACHABLE);
   if (goals.length === 0) return field;
 
-  const frontier: Array<{ x: number; y: number; cost: number }> = [];
+  // Tiles are carried as flat indices and costs live in `field`, so the queue
+  // holds plain numbers and the search allocates nothing per relaxation.
+  const width = map.width;
+  const frontier = new BucketQueue();
   for (const goal of goals) {
     if (!map.onMap(goal.x, goal.y)) continue;
-    field[goal.y * map.width + goal.x] = 0;
-    frontier.push({ x: goal.x, y: goal.y, cost: 0 });
+    field[goal.y * width + goal.x] = 0;
+    frontier.push(goal.y * width + goal.x, 0);
   }
 
   const NEIGHBOURS = [[0, -1], [1, 0], [0, 1], [-1, 0]] as const;
-  while (frontier.length > 0) {
-    frontier.sort((a, b) => a.cost - b.cost);
-    const current = frontier.shift()!;
-    if (current.cost > field[current.y * map.width + current.x]) continue;
+  while (frontier.size > 0) {
+    const index = frontier.pop();
+    const cy = (index / width) | 0;
+    const cx = index - cy * width;
+    const current = field[index];
+    // A tile can be queued more than once; the later, cheaper entry wins and
+    // the stale one is skipped here rather than removed from the queue.
+    if (current > field[index]) continue;
 
     for (const [dx, dy] of NEIGHBOURS) {
-      const x = current.x + dx;
-      const y = current.y + dy;
+      const x = cx + dx;
+      const y = cy + dy;
       if (!map.onMap(x, y)) continue;
       // Cost this unit pays stepping from (x,y) into the tile we came from.
-      const step = unit.getMovementCosts(current.x, current.y, x, y);
+      const step = unit.getMovementCosts(cx, cy, x, y);
       if (step < 0) continue;                       // impassable for this type
-      const cost = current.cost + step;
-      const index = y * map.width + x;
-      if (cost >= field[index]) continue;
-      field[index] = cost;
-      frontier.push({ x, y, cost });
+      assertIntegerCost(step, x, y);
+      const cost = current + step;
+      const at = y * width + x;
+      if (cost >= field[at]) continue;
+      field[at] = cost;
+      frontier.push(at, cost);
     }
   }
   return field;
