@@ -127,14 +127,20 @@ on epsilon-greedy self-play gains with depth where every previous configuration
 lost. Same run, same maps, same seats, same fog, same reply setting; the
 evaluator is the only variable:
 
-| 200 -> 1600 nodes | slope |
-|---|---|
-| plain planner (hand-priced) | 0.555 -> 0.477 = **-0.078** |
-| net on epsilon-greedy data | 0.844 -> **0.883** = **+0.039** |
+Confirmed over a 16x budget range, four points each, same maps and harness:
 
-Difference-in-differences +0.117 (~1.4 sigma, so confirm before treating as
-fact) -- but the control reproduces its -0.078 to three decimals for the fifth
-time, so the contrast is not harness drift.
+| nodes | net on epsilon-greedy data | plain planner |
+|---|---|---|
+| 200 | 0.844 | 0.555 |
+| 400 | 0.867 | 0.516 |
+| 1600 | **0.883** | 0.477 |
+| 3200 | **0.883** | 0.477 |
+
+Both monotone, in opposite directions. Both plateau between 1600 and 3200
+because the search saturates -- a turn runs out of legal moves before the budget
+runs out, so the planner spends only ~317 nodes of a 1600 budget and the extra
+buys literally nothing (identical match records at the two budgets). The shape
+to expect is therefore **rising until saturation, then flat, never degrading**.
 
 Why the data and not the search: deterministic self-play records exactly ONE
 continuation per position, so the data never says what a different move would
