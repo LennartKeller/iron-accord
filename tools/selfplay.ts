@@ -43,6 +43,8 @@ const topK = Number(arg('topK', '3'));
 const plannerNodes = Number(arg('plannerNodes', '0'));
 /** Value net for planner seats, e.g. models/value.onnx. */
 const model = arg('model', '');
+/** Opponent-reply actions for planner seats; -1 keeps the planner default. */
+const replyActions = Number(arg('reply', '-1'));
 // Leave a core for the OS and this process; oversubscribing slows everything.
 const workerCount = Math.max(1, Math.min(Number(arg('workers', '0')) || os.availableParallelism() - 2, games));
 
@@ -81,6 +83,7 @@ function* jobs(): Generator<Job> {
       topK,
       plannerNodes,
       model,
+      replyActions,
     };
   }
 }

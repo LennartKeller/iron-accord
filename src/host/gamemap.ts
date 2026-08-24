@@ -42,6 +42,19 @@ export class GameMap {
 
   /** Hands out stable unit identities; see Unit.uid. */
   nextUnitUid(): number { return ++this.unitUidCounter; }
+
+  /**
+   * The uid counter, so `explore()` can rewind it with everything else.
+   *
+   * Simulating production inside the search hands out uids, and restoring the
+   * units afterwards puts their identities back but left the counter advanced.
+   * The next unit the game really built then got a uid inflated by however many
+   * the search had imagined — invisible during play, and fatal afterwards: the
+   * recorded actions referenced uids a replay never assigns, so planner games
+   * could not be reproduced from their own replays at all.
+   */
+  getUnitUidCounter(): number { return this.unitUidCounter; }
+  setUnitUidCounter(value: number): void { this.unitUidCounter = value; }
   getUnitByUid(uid: number): Unit | null {
     return this.units.find(unit => unit.uid === uid) ?? null;
   }

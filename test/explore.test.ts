@@ -50,6 +50,27 @@ describe('explore', () => {
     expect(game.map.getTerrain(0, 0).getHp()).toBe(10);
   });
 
+  it('puts the unit identity counter back', () => {
+    // A search that imagines building a unit consumed a uid, and restoring the
+    // board put the units back without rewinding the counter — so the next unit
+    // the game really built got an identity shifted by however much the agent
+    // had thought. Invisible during play and fatal afterwards: recorded actions
+    // referenced uids a replay never assigns, which made planner self-play
+    // impossible to reproduce from its own replays.
+    const { game, env } = loadGame(5);
+    const player = game.map.getPlayer(0)!;
+    const before = game.map.getUnitUidCounter();
+
+    env.explore(() => {
+      game.map.addUnit('INFANTRY', player, 0, 0);
+      game.map.addUnit('INFANTRY', player, 0, 1);
+    });
+
+    expect(game.map.getUnitUidCounter()).toBe(before);
+    // And the next real unit takes the identity it would have had anyway.
+    expect(game.map.addUnit('INFANTRY', player, 0, 0).uid).toBe(before + 1);
+  });
+
   it('does not spend the randomness the real game will use', () => {
     // A search agent simulates attacks to decide what to play. If exploring
     // consumed the shared luck stream, the outcome of the move it finally makes

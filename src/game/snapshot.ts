@@ -75,6 +75,8 @@ export interface GameState {
    * do not — the sweep it rides along with is the one buildings already do.
    */
   terrain: TerrainState[];
+  /** Next unit identity to hand out; see GameMap.getUnitUidCounter. */
+  unitUidCounter: number;
 }
 
 /** A destructible tile: what it was, and how intact. */
@@ -145,6 +147,7 @@ export function snapshot(game: Game): GameState {
     units: map.units.map(captureUnit),
     buildings,
     terrain,
+    unitUidCounter: map.getUnitUidCounter(),
   };
 }
 
@@ -223,6 +226,20 @@ export function restore(game: Game, state: GameState): void {
     building.setOwner(buildingState.owner >= 0 ? map.getPlayer(buildingState.owner) ?? null : null);
     building.hp = buildingState.hp;
     building.fireCount = buildingState.fireCount;
+  }
+
+  // After the units, because restoreUnit's assignUnitUid raises the counter to
+  // fit each uid it restores.
+  //
+  // IRON_ACCORD_LEGACY_UIDS reproduces the pre-fix numbering, where the counter
+  // was left inflated by every restore (each restored unit's constructor takes
+  // a fresh uid before assignUnitUid overwrites it, so a reset roughly doubled
+  // it). Replays recorded before the fix reference those inflated uids, so they
+  // are only reproducible with it set. New data never needs it, and correctness
+  // is the default: without the rewind, a search that imagines building a unit
+  // permanently shifts the identity of the next one the game really builds.
+  if (!process.env.IRON_ACCORD_LEGACY_UIDS) {
+    map.setUnitUidCounter(state.unitUidCounter);
   }
 
   map.vision.update();

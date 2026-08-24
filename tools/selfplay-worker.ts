@@ -37,6 +37,8 @@ export interface Job {
   topK?: number;
   /** Per-turn budget for planner seats, in nodes. 0 keeps the time budget. */
   plannerNodes?: number;
+  /** Opponent-reply actions for planner seats; -1 keeps the planner default. */
+  replyActions?: number;
   /** ONNX value net for planner seats; empty uses the hand-priced evaluation. */
   model?: string;
 }
@@ -75,6 +77,8 @@ function agentFor(name: string, seed: number, job: Job): Agent {
     return new PlannerAgent({
       timeBudgetMs: 150,
       nodeBudget: job.plannerNodes ?? 0,
+      ...(job.replyActions !== undefined && job.replyActions >= 0
+        ? { opponentReplyActions: job.replyActions } : {}),
       evaluator: sharedEvaluator ?? undefined,
       exploration: epsilonFor,
     });
