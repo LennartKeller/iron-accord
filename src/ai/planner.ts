@@ -1,4 +1,4 @@
-import { HeuristicAgent } from './heuristic.ts';
+import { HeuristicAgent, type ExplorationOptions } from './heuristic.ts';
 import { Belief } from './belief.ts';
 import { HeuristicEvaluator, type Evaluator } from './evaluator.ts';
 import { DEFAULT_POSITION_WEIGHTS, type PositionWeights } from './position.ts';
@@ -158,6 +158,23 @@ export interface PlannerOptions {
    * the next seat, which is the whole opposition only in a two-player game.
    */
   opponentReplyActions: number;
+  /**
+   * Departs from the best plan sometimes, for generating training data.
+   *
+   * The same problem `HeuristicAgent`'s exploration solves, one level up. The
+   * planner picks its turn by argmax over the beam, so planner self-play would
+   * record exactly one continuation per position and the data would carry no
+   * counterfactual — which is the degeneracy epsilon-greedy self-play was
+   * introduced to fix, and which measurably costs a value net its ability to
+   * separate the sibling positions a beam layer compares.
+   *
+   * Sampling is among the best plans the search actually found, not among all
+   * of them: the tail of a beam is full of plans the search already judged bad,
+   * and playing those produces the off-distribution boards that made a random
+   * agent slice hurt rather than help. Null keeps the planner deterministic,
+   * which is what every benchmark and the shipped agent want.
+   */
+  exploration: ExplorationOptions | null;
   /** How positions are scored. Swap in a network without touching the search. */
   evaluator?: Evaluator<unknown>;
   /**
@@ -210,6 +227,7 @@ export const DEFAULT_PLANNER_OPTIONS: PlannerOptions = {
   // lets the hand-priced planner beat the greedy agent. It does not flatten the
   // depth slope -- see the option's own comment for that measurement.
   opponentReplyActions: 8,
+  exploration: null,
   position: DEFAULT_POSITION_WEIGHTS,
 };
 
@@ -263,6 +281,7 @@ export class PlannerAgent implements Agent {
   private readonly replyOrdering = new HeuristicAgent();
   private belief: Belief | null = null;
   private beliefPlayer = -1;
+  private rngState: number;
   private queue: ActionDescriptor[] = [];
   private queueTurn = -1;
   /** Length of the plan behind `queue`, for the diagnostics taps only. */
@@ -272,6 +291,7 @@ export class PlannerAgent implements Agent {
     this.options = { ...DEFAULT_PLANNER_OPTIONS, ...options };
     this.evaluator = this.options.evaluator ?? new HeuristicEvaluator(this.options.position);
     this.name = name;
+    this.rngState = (this.options.exploration?.seed ?? 1) >>> 0 || 1;
   }
 
   beginTurn(env: GameEnvironment): void {
@@ -348,6 +368,15 @@ export class PlannerAgent implements Agent {
 
     let beam: Plan[] = [{ actions: [], score: -Infinity }];
     let best: Plan = { actions: [], score: -Infinity };
+    // The best few plans seen across every layer, for exploration to sample
+    // from. Kept sorted, best first, and only as long as it needs to be.
+    const shortlist: Plan[] = [];
+    const remember = (plan: Plan) => {
+      if (!this.options.exploration) return;
+      shortlist.push(plan);
+      shortlist.sort((a, b) => b.score - a.score);
+      shortlist.length = Math.min(shortlist.length, this.options.exploration.topK);
+    };
 
     // The position as it stands, so a turn that does nothing has a price.
     const opening = this.evaluator.capture(env.game, self, belief);
@@ -493,9 +522,11 @@ export class PlannerAgent implements Agent {
           if (adjusted > bestReplyScore) {
             best = next[0];
             bestReplyScore = adjusted;
+            remember(next[0]);
           }
         } else {
           best = next[0];
+          remember(next[0]);
         }
       }
       beam = next.slice(0, this.options.beamWidth);
@@ -510,7 +541,28 @@ export class PlannerAgent implements Agent {
       scored,
       depthSearched,
     });
+    // Sampling happens after the plan is chosen, so diagnostics and the reply
+    // veto still describe the search's own preference rather than the sample.
+    const exploration = this.options.exploration;
+    if (exploration && shortlist.length > 1 && this.random() < exploration.epsilon) {
+      return shortlist[Math.floor(this.random() * shortlist.length)].actions;
+    }
     return best.actions;
+  }
+
+  /**
+   * Private Mulberry32, never the shared script RNG.
+   *
+   * `explore()` rewinds the script RNG so deliberation cannot consume the
+   * game's luck; drawing exploration from it would make the sampled plan depend
+   * on how hard the agent thought, which is the same bug in a new place.
+   */
+  private random(): number {
+    this.rngState = (this.rngState + 0x6D2B79F5) >>> 0;
+    let t = this.rngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
   /**

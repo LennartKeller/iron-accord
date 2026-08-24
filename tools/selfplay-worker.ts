@@ -17,6 +17,10 @@ import { loadIntoGameMap } from '../src/maps/loadmap.ts';
 import { bootstrap } from '../src/game/bootstrap.node.ts';
 import { cwRoot } from '../src/cw/resources.node.ts';
 import { Game } from '../src/game/game.ts';
+import { BudgetedValueNet } from '../src/ai/onnx-evaluator.ts';
+import { loadValueNet } from '../src/ai/valuenet.node.ts';
+import { HeuristicEvaluator } from '../src/ai/evaluator.ts';
+import type { Evaluator } from '../src/ai/evaluator.ts';
 import { GameEnvironment, HeuristicAgent, PlannerAgent, RandomAgent, playMatch } from '../src/ai/index.ts';
 import type { Agent } from '../src/ai/index.ts';
 import type { ActionDescriptor } from '../src/ai/actions.ts';
@@ -31,6 +35,10 @@ export interface Job {
   /** Exploration for the heuristic seats; 0 keeps the agent deterministic. */
   epsilon?: number;
   topK?: number;
+  /** Per-turn budget for planner seats, in nodes. 0 keeps the time budget. */
+  plannerNodes?: number;
+  /** ONNX value net for planner seats; empty uses the hand-priced evaluation. */
+  model?: string;
 }
 
 export interface Replay {
@@ -57,16 +65,48 @@ const sources = new Map<string, ReturnType<typeof readMap>>();
  * meant to fix. Derived from the job seed, so a job still reproduces exactly.
  */
 function agentFor(name: string, seed: number, job: Job): Agent {
-  if (name === 'planner') return new PlannerAgent({ timeBudgetMs: 150 });
+  const epsilonFor = (job.epsilon ?? 0) > 0
+    ? { epsilon: job.epsilon!, topK: job.topK ?? 3, seed }
+    : null;
+  if (name === 'planner') {
+    // Exploration matters more here than for the heuristic: the planner picks
+    // its whole turn by argmax, so without it planner self-play regenerates one
+    // continuation per position and the data carries no counterfactual.
+    return new PlannerAgent({
+      timeBudgetMs: 150,
+      nodeBudget: job.plannerNodes ?? 0,
+      evaluator: sharedEvaluator ?? undefined,
+      exploration: epsilonFor,
+    });
+  }
   if (name === 'random') return new RandomAgent(seed);
   // Exploration is seeded from the job so a generated game stays reproducible.
-  const epsilon = job.epsilon ?? 0;
-  return new HeuristicAgent({}, 'heuristic', epsilon > 0
-    ? { epsilon, topK: job.topK ?? 3, seed }
-    : null);
+  return new HeuristicAgent({}, 'heuristic', epsilonFor);
+}
+
+/**
+ * One evaluator per worker, not per game: building a session and its encoders
+ * costs far more than a match, and the evaluator holds no per-game state.
+ */
+let sharedEvaluator: Evaluator<unknown> | null = null;
+
+/**
+ * Loads the value net once, on the first job that asks for one.
+ *
+ * The session and its per-board encoders cost far more to build than a match,
+ * and neither holds per-game state, so one per worker is right. `maxPerLayer`
+ * is the whole layer here: this is Node, where a forward pass is ~1.25 ms, and
+ * capping it would put the hand-priced score back in charge of what gets
+ * searched — the exact thing generating with the planner is meant to escape.
+ */
+async function ensureEvaluator(job: Job): Promise<void> {
+  if (sharedEvaluator || !job.model) return;
+  const net = await loadValueNet(job.model);
+  sharedEvaluator = new BudgetedValueNet(net, new HeuristicEvaluator(), 64) as Evaluator<unknown>;
 }
 
 async function play(job: Job): Promise<Replay> {
+  await ensureEvaluator(job);
   let source = sources.get(job.map);
   if (!source) {
     source = readMap(fs.readFileSync(path.join(cwRoot(), job.map)));

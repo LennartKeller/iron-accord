@@ -13,10 +13,33 @@ import path from 'node:path';
 import ort from 'onnxruntime-node';
 import { ValueNetEvaluator, type ValueNetMeta } from './onnx-evaluator.ts';
 
+/**
+ * Runs the net on the GPU when VALUENET_CUDA is set, falling back silently.
+ *
+ * Self-play with a net-guided planner is inference-bound: a game costs ~167
+ * core-seconds against ~7 for heuristic play, almost all of it forward passes.
+ * On this machine CUDA measured 0.114 ms per position against ~1.25 ms on CPU,
+ * an 11x difference, which is what decides whether an expert-iteration round is
+ * an afternoon or a week.
+ *
+ * Opt-in rather than automatic: it needs the CUDA and cuDNN shared libraries on
+ * the loader path (the torch venv ships them), and a benchmark that silently
+ * changed backend would make its own numbers incomparable.
+ */
 export async function loadValueNet(modelPath = 'models/value.onnx'): Promise<ValueNetEvaluator> {
   const metaPath = `${modelPath.replace(/\.onnx$/, '')}.json`;
   const meta: ValueNetMeta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-  const session = await ort.InferenceSession.create(path.resolve(modelPath));
+  const resolved = path.resolve(modelPath);
+  let session: unknown;
+  if (process.env.VALUENET_CUDA) {
+    try {
+      session = await ort.InferenceSession.create(resolved, { executionProviders: ['cuda'] });
+    } catch (error) {
+      console.warn('VALUENET_CUDA set but the CUDA provider failed; using CPU:',
+        error instanceof Error ? error.message : error);
+    }
+  }
+  session ??= await ort.InferenceSession.create(resolved);
 
   return new ValueNetEvaluator(
     session as never,

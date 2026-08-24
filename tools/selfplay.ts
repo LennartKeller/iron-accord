@@ -39,6 +39,10 @@ const maxDays = Number(arg('maxDays', '30'));
  */
 const epsilon = Number(arg('epsilon', '0'));
 const topK = Number(arg('topK', '3'));
+/** Node budget for planner seats; 0 leaves them on the wall clock. */
+const plannerNodes = Number(arg('plannerNodes', '0'));
+/** Value net for planner seats, e.g. models/value.onnx. */
+const model = arg('model', '');
 // Leave a core for the OS and this process; oversubscribing slows everything.
 const workerCount = Math.max(1, Math.min(Number(arg('workers', '0')) || os.availableParallelism() - 2, games));
 
@@ -75,6 +79,8 @@ function* jobs(): Generator<Job> {
       maxDays,
       epsilon,
       topK,
+      plannerNodes,
+      model,
     };
   }
 }

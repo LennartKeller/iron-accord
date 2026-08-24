@@ -232,6 +232,14 @@ if (Math.abs(mirror - 0.5) > 1e-9) {
  */
 const onlyPolicy = process.env.ONLY === 'policy' || process.env.ONLY === 'h2h';
 const onlyH2h = process.env.ONLY === 'h2h';
+/**
+ * ONLY=value skips the policy series entirely.
+ *
+ * For measuring the value head's depth curve, where the policy comparisons are
+ * pure cost: `policy+net v net alone` runs two searching agents against each
+ * other, so at 3200 nodes it is several hours on its own.
+ */
+const onlyValue = process.env.ONLY === 'value';
 
 console.log('');
 if (!onlyPolicy) await series('A: net v greedy', 'budgeted', 'greedy', maps, fogs);
@@ -240,7 +248,7 @@ if (evaluatorB && !onlyPolicy) {
   // The head-to-head. Rate is from A's point of view: above 0.500 means A wins.
   await series('A v B (head to head)', 'budgeted', 'budgetedB', maps, fogs);
 }
-if (policy) {
+if (policy && !onlyValue) {
   if (!onlyH2h) await series('policy+net v greedy', 'policy', 'greedy', maps, fogs);
   // The one comparison that isolates move ordering: same evaluator, same
   // budget, the only difference being who chooses what to search.
