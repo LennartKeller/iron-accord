@@ -10,5 +10,11 @@ data/
 
 # Python env and trained models for the value net.
 .venv/
-models/
+# Checkpoints stay out; the deployed pair is committed so GitHub Pages has a
+# model to serve. The web build fetches value.onnx at runtime and degrades to a
+# seat that reports "no value net" without it, so this is a deploy artefact
+# rather than a build dependency.
+models/*
+!models/value.onnx
+!models/value.json
 __pycache__/
