@@ -1,4 +1,5 @@
 import type { Game } from '../game/game.ts';
+import type { Belief } from './belief.ts';
 import { vocabulary } from '../scripts/vocabulary.ts';
 import { GameEnums, MAX_UNIT_HP } from '../host/index.ts';
 
@@ -64,6 +65,13 @@ export class ObservationEncoder {
       'unit:mine', 'unit:theirs', 'unit:hp', 'unit:fuel', 'unit:ammo', 'unit:spent',
       'building:mine', 'building:theirs', 'building:neutral', 'building:capture',
       'vision:clear', 'vision:fogged',
+      // Memory. Fog makes the game non-Markovian in observations: where an
+      // enemy was last seen is real information a human tracks and the encoder
+      // otherwise throws away, so a net reading only current vision treats a
+      // tank that stepped into the fog as though it had ceased to exist.
+      // Remembered-but-not-currently-seen only; a visible unit is already in
+      // the unit planes, and duplicating it would teach the net to double-count.
+      'memory:enemy', 'memory:hp', 'memory:staleness',
     ];
 
     this.spec = {
@@ -107,7 +115,7 @@ export class ObservationEncoder {
     );
   }
 
-  encode(game: Game, viewerIndex = game.currentPlayerIndex): Observation {
+  encode(game: Game, viewerIndex = game.currentPlayerIndex, belief?: Belief | null): Observation {
     const { width, height } = this;
     const planeSize = width * height;
     const planes = new Float32Array(this.spec.channels * planeSize);
@@ -177,6 +185,21 @@ export class ObservationEncoder {
       Math.min(enemies.reduce((sum, p) => sum + p.units.length, 0) / 50, 1),
       totalIncome > 0 ? myIncome / totalIncome : 0,
     ]);
+
+    // Memory planes, written after the per-tile pass because they come from the
+    // belief rather than the board. Only units NOT currently visible: anything
+    // in view is already in the unit planes above.
+    if (belief) {
+      for (const known of belief.known()) {
+        if (known.seen) continue;
+        if (known.x < 0 || known.y < 0 || known.x >= width || known.y >= height) continue;
+        planes[at(base + 12, known.x, known.y)] = 1;
+        planes[at(base + 13, known.x, known.y)] = Math.min(known.hp / 10, 1);
+        // Staleness saturates: past about a week the memory is worthless and
+        // the exact age stops carrying information.
+        planes[at(base + 14, known.x, known.y)] = Math.min(known.age / 7, 1);
+      }
+    }
 
     return { planes, scalars, spec: this.spec };
   }

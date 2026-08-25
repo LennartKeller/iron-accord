@@ -407,7 +407,10 @@ for await (const line of lines) {
       // so a bucket can cross the shard size mid-game — and a typed array drops
       // out-of-range writes silently rather than throwing.
       if (bucket.count >= shardSize) flush(bucket);
-      const observation = encoder.encode(game, acting);
+      // The same belief the agent had: extraction already maintains one per
+      // seat with the planner's lifecycle, so the memory planes match what an
+      // agent would actually have seen at this point in the game.
+      const observation = encoder.encode(game, acting, beliefs.get(acting) ?? null);
       let label = outcomeFor(replay, game, acting);
       if (gamma !== 1) {
         const remaining = Math.max(0, replay.days - game.day);

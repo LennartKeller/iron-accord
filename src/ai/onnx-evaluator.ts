@@ -88,12 +88,15 @@ export class ValueNetEvaluator implements Evaluator<PackedPosition> {
     return encoder;
   }
 
-  capture(game: Game, self: Player, _belief: Belief): PackedPosition {
+  capture(game: Game, self: Player, belief: Belief | null): PackedPosition {
     const encoder = this.encoderFor(game);
     const over = game.over
       ? (game.over.winningTeam === self.getTeam() ? 1 : -1)
       : 0;
-    const observation = encoder.encode(game, self.getPlayerID());
+    // The belief supplies the memory planes: without it a remembered enemy
+    // simply is not in the observation, and the net cannot tell "nothing there"
+    // from "something there I cannot currently see".
+    const observation = encoder.encode(game, self.getPlayerID(), belief);
     const { width, height } = game.map;
     const planeSize = width * height;
     const { terrainCount, unitCount, buildingCount, derivedCount, none } = this.meta;
