@@ -50,6 +50,38 @@ modes, both seats, 250 ms, `maxPerLayer 36`:
 The plain planner reproducing 0.445 against the 0.44 recorded below, on a map
 pool it was never measured on, is the check that the rest is real.
 
+**Expert iteration works, weakly, and only with a replay buffer.** Iteration 1:
+7,000 net-guided planner games (both seats on the previous net, epsilon 0.15,
+200 nodes), 8 hours. Trained two ways and played against the net that generated
+the data, 16 held-out maps, 400 nodes:
+
+| net | training data | vs greedy | vs teacher |
+|---|---|---|---|
+| pure | 1.07M, iteration-1 games only | 0.727 | **0.273** |
+| **buffer** | 4.93M, iteration 1 + previous | **0.898** | **0.539** |
+| teacher | 4.75M, epsilon-greedy heuristic | 0.859 | — |
+
+Training on the new iteration ALONE is actively harmful -- 0.273 against the
+teacher. Mixed with the previous generation it beats the teacher by +0.039, and
+for the first time in this project the direct and indirect measures agree
+exactly (0.898 - 0.859 = +0.039; 0.539 head-to-head is the same margin). Neither
+clears significance alone at n=64.
+
+Caveats worth respecting before spending more compute. The buffer carries ~23%
+more training data than the teacher had, so some of the gain may be volume
+rather than quality -- iteration 2 should hold total volume constant by dropping
+the oldest games. And exploration is far more disruptive for a planner than for
+the heuristic: epsilon perturbs one action for the heuristic and an entire turn
+for the planner, so the same nominal 0.15 is a much larger perturbation and is a
+prime suspect if a future iteration degrades.
+
+The open question is whether it COMPOUNDS. +0.04 for 8 hours is worth automating
+only if iteration 2 adds another; if it flattens, iteration 1 was a one-off gain
+from mixing better games into the pool. Note also that planner self-play costs
+~94 core-seconds a game against ~4 for heuristic play, almost all of it the
+search's own simulate-and-rewind -- so throughput, not method, is the lever on
+every further iteration.
+
 **Training data: breadth beat volume, and the benchmark data bought nothing.**
 16 maps held out from every net below, 64 matches per series, 250 ms:
 
