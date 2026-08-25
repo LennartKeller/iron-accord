@@ -2,6 +2,7 @@ import type { Agent } from './agent.ts';
 import type { GameEnvironment } from './environment.ts';
 import type { ActionDescriptor } from './actions.ts';
 import type { Unit, Player } from '../host/index.ts';
+import { computeMovementRange } from '../game/pathfinding.ts';
 import {
   unitValue, buildingValue, buildThreatMap, captureTargets, canCapture,
   isCapturable, terrainDefence, type ThreatMap,
@@ -41,6 +42,19 @@ export interface HeuristicWeights {
    * agent behaved before transports were scored at all.
    */
   transportWeight: number;
+  /**
+   * How much a unit's matchup against the enemy's actual army is worth.
+   *
+   * Production was scored almost entirely by price (`cost / 12`), so the agent
+   * bought whatever was most expensive and never asked what it was for. On a
+   * map with no pipes that buys PIPERUNNERs -- immobile, and parked on the
+   * factory that built them -- and two agents doing it to each other produce a
+   * drawn game neither can end. It also explains a build list topped by
+   * MEGATANK and STEALTHBOMBER regardless of what the opponent fields.
+   *
+   * Zero restores the price-only behaviour.
+   */
+  matchupWeight: number;
 }
 
 export const DEFAULT_WEIGHTS: HeuristicWeights = {
@@ -51,6 +65,10 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   coverWeight: 90,
   reserveFunds: 0,
   transportWeight: 1,
+  // Untuned: chosen so a good matchup is worth a few hundred points against the
+  // capturer bonus of 900, not fitted. Weight search has failed twice on this
+  // agent and is not worth a third attempt -- see the handoff.
+  matchupWeight: 1,
 };
 
 interface TurnContext {
@@ -92,11 +110,26 @@ export interface ExplorationOptions {
   seed: number;
 }
 
+/** The best base damage any of `attacker`'s weapons does to `defender`. */
+function bestBaseDamage(map: Unit['map'], attacker: Unit, defender: Unit): number {
+  let best = 0;
+  for (const weaponID of [attacker.weapon1ID, attacker.weapon2ID]) {
+    if (!weaponID) continue;
+    const damage = map.registry[weaponID]?.getBaseDamage?.(defender);
+    if (typeof damage === 'number' && damage > best) best = damage;
+  }
+  return best;
+}
+
 export class HeuristicAgent implements Agent {
   readonly name: string;
   private readonly weights: HeuristicWeights;
   private context: TurnContext | null = null;
   private contextPlayer = -1;
+  /** Whether a unit id can move at all on this board; see canEverMove. */
+  private readonly mobility = new Map<string, boolean>();
+  /** Matchup value per unit id and build tile; see matchupValue. */
+  private readonly matchups = new Map<string, number>();
   private readonly exploration: ExplorationOptions | null;
   private rngState: number;
 
@@ -410,6 +443,88 @@ export class HeuristicAgent implements Agent {
    * Production. Foot units are prioritised while there is anything left to
    * capture, because captures compound; otherwise buy the most value per fund.
    */
+  /**
+   * Can a unit of this id enter any tile on this board?
+   *
+   * Production is otherwise scored mostly by price, which on a map with no
+   * pipes buys PIPERUNNERs: expensive, immobile, and parked on the factory that
+   * built them, so nothing else can be produced there either. Two agents doing
+   * it to each other is a drawn game neither can end -- and a mutual pathology
+   * is invisible to a win rate, which is how this survived in 96% of the
+   * PIPERUNNERs in the training data (4,900 of 5,095 built on pipeless maps).
+   *
+   * It has to be REACHABILITY from the factory, not "is any tile enterable":
+   * a PIPERUNNER can enter pipe stations and bases, so an enterable-tile test
+   * says yes on a map where every route between them is impassable, and the
+   * unit is still stuck on the factory that built it.
+   *
+   * Answered with a probe unit because the movement tables take one, and cached
+   * per unit id and build tile: the answer depends only on the board, which
+   * does not change within a turn.
+   */
+  private canEverMove(
+    env: GameEnvironment, unitId: string, owner: Player, at: { x: number; y: number },
+  ): boolean {
+    const cacheKey = `${unitId}@${at.x},${at.y}`;
+    const cached = this.mobility.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const map = env.game.map;
+    const uidBefore = map.getUnitUidCounter();
+    const probe = map.addUnit(unitId, owner, at.x, at.y);
+    // More than its own tile means it can actually leave.
+    const mobile = computeMovementRange(map, probe).tiles.size > 1;
+    map.removeUnit(probe);
+    map.setUnitUidCounter(uidBefore);
+    this.mobility.set(cacheKey, mobile);
+    return mobile;
+  }
+
+  /**
+   * What a unit of this id is worth against the enemy army we can actually see.
+   *
+   * For each visible enemy: the value we expect to destroy, minus the value we
+   * expect to lose to it, using the same base-damage tables the attack scorer
+   * uses. Averaged over the enemies, so it is a per-engagement expectation
+   * rather than a total, and normalised by cost so a cheap effective unit can
+   * beat an expensive mismatched one.
+   *
+   * Only visible enemies count. Reading the whole board here would have the
+   * agent countering units it has no way of knowing about, which is both
+   * cheating and, under fog, unlearnable for anything imitating it.
+   */
+  private matchupValue(
+    env: GameEnvironment, unitId: string, owner: Player, at: { x: number; y: number },
+  ): number {
+    const key = `${unitId}@${at.x},${at.y}`;
+    const cached = this.matchups.get(key);
+    if (cached !== undefined) return cached;
+
+    const map = env.game.map;
+    const enemies = map.units.filter(other =>
+      owner.isEnemyUnit(other)
+      && owner.getFieldVisible(other.x, other.y)
+      && !other.isStealthed(owner));
+
+    let score = 0;
+    if (enemies.length > 0) {
+      const uidBefore = map.getUnitUidCounter();
+      const probe = map.addUnit(unitId, owner, at.x, at.y);
+      let total = 0;
+      for (const enemy of enemies) {
+        // Base damage is a percentage of a full-health unit's value.
+        const ours = bestBaseDamage(map, probe, enemy) / 100;
+        const theirs = bestBaseDamage(map, enemy, probe) / 100;
+        total += enemy.getCosts() * ours - probe.getCosts() * theirs;
+      }
+      score = total / enemies.length;
+      map.removeUnit(probe);
+      map.setUnitUidCounter(uidBefore);
+    }
+    this.matchups.set(key, score);
+    return score;
+  }
+
   private scoreBuild(
     env: GameEnvironment, context: TurnContext, action: ActionDescriptor,
   ): number {
@@ -417,6 +532,8 @@ export class HeuristicAgent implements Agent {
     const player = context.self;
     const cost = this.buildCost(env, action);
     if (cost <= 0 || player.funds - cost < this.weights.reserveFunds) return 0;
+    // Never buy a unit that cannot leave the factory.
+    if (!this.canEverMove(env, action.unitId, player, action.at)) return 0;
 
     const capturers = player.units.filter(canCapture).length;
     const wantsCapturers = context.captures.length > 0 && capturers < 2 + context.captures.length / 3;
@@ -426,7 +543,11 @@ export class HeuristicAgent implements Agent {
 
     // Spending is only worth it against the alternative of saving, so the score
     // is deliberately modest — an attack or a capture should outrank it.
+    // Price is a weak proxy for usefulness and used to be the whole signal.
     let score = cost / 12;
+    // What this unit is actually for, against what the enemy actually has.
+    score += this.matchupValue(env, action.unitId, player, action.at)
+      * this.weights.matchupWeight / 12;
     if (isFoot && wantsCapturers) score += 900;
     if (!isFoot && !wantsCapturers) score += 200;
     // Prefer spending most of the bank rather than dribbling out infantry.
