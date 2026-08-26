@@ -50,6 +50,35 @@ modes, both seats, 250 ms, `maxPerLayer 36`:
 The plain planner reproducing 0.445 against the 0.44 recorded below, on a map
 pool it was never measured on, is the check that the rest is real.
 
+**A win rate cannot tell you the game is playable, and that is the trap.** Two
+agents both bought PIPERUNNERs on maps with no pipes -- immobile, parked on the
+factory that built them -- and drew. The scoreline said 0.500, every offline
+metric was untroubled, and it was found by a human watching a game. 96% of the
+PIPERUNNERs in the training data were on pipeless boards. Production was scored
+as `cost / 12`: expensive meant good, and nothing asked what a unit was for.
+
+`tools/probe-agent.ts` exists so the next one surfaces without a human. It
+reports the WORST case over a panel rather than the mean -- a policy strong on
+average and catastrophic against one style is exploitable in the sense that
+matters -- plus self-play signatures where mutual failures live: factories
+blocked by their owner, units that cannot leave the tile they were built on,
+games ending on the day limit. Use it as the acceptance gate, not a win rate.
+
+**The current baseline.** 45,000 epsilon-greedy games on 87 maps with
+counter-aware production, 6.83M positions, memory channels on:
+
+| | |
+|---|---|
+| worst case over the panel | **0.828** (v plain planner) |
+| v greedy / v deep plain | 0.844 / 0.844 |
+| rank/map v heuristic | 0.650 v 0.479 |
+| immobile units in self-play | 0.06 per game |
+
+Note the reference moved: this greedy has counter-aware production and beats the
+old price-ranked one 0.667, so 0.828 against it is worth more than the 0.898 an
+earlier net scored against the weak one. Rates from different eras of this
+project are NOT comparable.
+
 **Expert iteration works, weakly, and only with a replay buffer.** Iteration 1:
 7,000 net-guided planner games (both seats on the previous net, epsilon 0.15,
 200 nodes), 8 hours. Trained two ways and played against the net that generated
