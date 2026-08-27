@@ -1,5 +1,8 @@
 import type { ScriptRegistry } from '../scripts/types.ts';
 
+/** Where `attach` parks the runner so `Game` can find it without being told. */
+export const ANIMATION_RUNNER_KEY = '__ironAccordAnimationRunner';
+
 /**
  * Stand-in for Commander Wars' animation system.
  *
@@ -76,7 +79,19 @@ export class AnimationRunner {
   private pending: PendingCallback[] = [];
   private running = false;
 
-  attach(registry: ScriptRegistry): void { this.registry = registry; }
+  /**
+   * Binds the runner to a registry, and records it there under a well-known key.
+   *
+   * The back-reference is what lets `Game` default to the runner the scripts are
+   * already wired to. Without it, constructing a Game and forgetting to pass one
+   * produces a game where every action that finishes in a callback -- capture
+   * above all -- silently does nothing, which looks like an AI that will not
+   * take ground rather than like a missing argument.
+   */
+  attach(registry: ScriptRegistry): void {
+    this.registry = registry;
+    (registry as ScriptRegistry & { [ANIMATION_RUNNER_KEY]?: AnimationRunner })[ANIMATION_RUNNER_KEY] = this;
+  }
 
   enqueue(callback: PendingCallback): void { this.pending.push(callback); }
 

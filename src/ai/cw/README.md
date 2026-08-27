@@ -59,6 +59,10 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `actions.ts` | the `ACTION_*` ids `CoreAI` names |
 | `coreai.ts` | `ai/coreai.cpp` -- island maps, predicates, the `append*Targets` family |
 | `transport.ts` | `CoreAI::doExtendedCircleAction` and the loading/unloading targets |
+| `unitdata.ts` | `MoveUnitData`, `createUnitData`, `sortUnitsFarFromEnemyFirst` |
+| `scoring.ts` | `calculateCounterDamage` / `getOwnSupportDamage` / `getBestAttackTarget` |
+| `movement.ts` | `getClosestReachableMovePath` / `getMoveTargetField` / `moveToSafety` |
+| `normalai.ts` | `NormalAi`'s step ladder, as an `Agent` |
 
 Regenerate the config after updating `ext/` with:
 
@@ -137,3 +141,36 @@ and in its capture loop it indexes the per-passenger island array by the
 *capture* index, so a transport carrying a non-capturing unit first reads the
 wrong island map. Only the last is guarded, and only against running off the end
 of the array.
+
+## Upstream's own AI script does not parse
+
+`resources/aidata/normal/__coreai.js` line 3 reads
+
+    highPrioBuildings = ["FACTORY"],
+
+inside an object literal, which is a hard syntax error. At upstream HEAD
+(d04be7dc7, 2026-08-20) the whole `COREAI` object therefore fails to load, and
+it is the only file under `resources/aidata/` that does -- every other one
+parses. `AI_BEHAVIOR_DISPATCH.getStrategy` returns `COREAI` for the default
+behaviour mode, so in the shipping game every production callback
+(`initializeSimpleProductionSystem`, `prepareProduction`,
+`buildUnitSimpleProductionSystem`, `onNewBuildQueue`) throws a ReferenceError,
+and so does `getHighPrioBuildings`.
+
+One character fixes it (`=` to `:`). Two consequences for this port:
+
+- `HIGH_PRIO_BUILDINGS` in `normalai.ts` is hard-coded to `["FACTORY"]`, which
+  is what the script would have returned.
+- Porting `SimpleProductionSystem` is worth much less than its 1,400 lines
+  suggest, because the group definitions that configure it live in the file
+  that does not load. The current production rung is a small, documented
+  stand-in rather than a port of a system whose configuration is broken.
+
+## Determinism
+
+The port is reproducible, but only if the environment is driven correctly: pass
+`bootstrap()`'s own `rng` as `EnvironmentOptions.rng` and call `env.reset(seed)`.
+That rng instance is the one wired into the script globals, so a *different*
+`Mulberry32` leaves the scripts on the shared stream and combat luck carries over
+between episodes -- four runs of one seed then differ. Every tool under `tools/`
+already does this correctly.

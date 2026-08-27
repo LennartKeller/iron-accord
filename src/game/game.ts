@@ -1,3 +1,4 @@
+import { ANIMATION_RUNNER_KEY } from '../host/animation.ts';
 import { GameAction, GameEnums, type GameMap, type Unit, type Player, type Building, type AnimationRunner } from '../host/index.ts';
 import type { ScriptRegistry } from '../scripts/types.ts';
 import { computeMovementRange, pathTo, key, type MovementRange, type ReachableTile } from './pathfinding.ts';
@@ -83,7 +84,12 @@ export class Game {
   ) {
     this.map = map;
     this.registry = registry;
-    this.animations = animations;
+    // Falling back to the runner the scripts are already attached to: an
+    // omitted argument used to mean capture never completed and matches ended
+    // on day two, with nothing logged. Pass one explicitly to override.
+    this.animations = animations
+      ?? ((registry as Record<string, unknown>)[ANIMATION_RUNNER_KEY] as AnimationRunner | undefined)
+      ?? null;
     // A new game starts at the top of day one whatever the map was saved at,
     // matching the seat reset above. Rules that read the day must see 1.
     this.map.currentPlayerIndex = 0;
