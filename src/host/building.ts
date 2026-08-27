@@ -182,4 +182,95 @@ export class BuildingHost {
     const value = this.map.registry[this.buildingID]?.getBaseIncome?.(this, this.map);
     return typeof value === 'number' ? value : 0;
   }
+
+  // --- AI surface -------------------------------------------------------
+  //
+  // Q_INVOKABLE on game/building.h, unused by the building scripts themselves
+  // and so absent until the CoreAI port. Transcriptions -- see src/ai/cw/README.md.
+
+  /**
+   * game/building.cpp: Building::getActionList.
+   *
+   * The C++ appends the owning CO's action modifiers; with no COs that reduces
+   * to getActions(), which is why this is an alias rather than a reimplementation.
+   */
+  getActionList(): string[] { return this.getActions(); }
+
+  /** game/building.cpp: Building::isProductionBuilding. */
+  isProductionBuilding(): boolean {
+    const actions = this.getActionList();
+    return actions.includes('ACTION_BUILD_UNITS')
+      || actions.includes('ACTION_BLACKHOLEFACTORY_DOOR1')
+      || actions.includes('ACTION_BLACKHOLEFACTORY_DOOR2')
+      || actions.includes('ACTION_BLACKHOLEFACTORY_DOOR3')
+      || actions.includes('ACTION_NEST_FACTORY_DOOR')
+      || actions.includes('ACTION_PRODUCE_OOZIUM_FREE');
+  }
+
+  /**
+   * game/building.cpp: Building::isCaptureBuilding -- note this asks the
+   * ACTION_CAPTURE script which buildings are capturable, not the building.
+   */
+  isCaptureBuilding(): boolean {
+    const list = this.map.registry.ACTION_CAPTURE?.getCapturableBuildings?.(this.map);
+    return Array.isArray(list) && list.includes(this.buildingID);
+  }
+
+  /** game/building.cpp: Building::isMissile -- likewise via ACTION_MISSILE. */
+  isMissile(): boolean {
+    const list = this.map.registry.ACTION_MISSILE?.getMissileBuildings?.(this.map);
+    return Array.isArray(list) && list.includes(this.buildingID);
+  }
+
+  /** game/building.cpp: Building::isCaptureOrMissileBuilding. */
+  isCaptureOrMissileBuilding(hasSiloTarget: boolean): boolean {
+    return this.isCaptureBuilding() || (hasSiloTarget && this.isMissile());
+  }
+
+  /** game/building.cpp: Building::isHq. */
+  isHq(): boolean {
+    return this.map.registry[this.buildingID]?.isHq?.(this, this.map) === true;
+  }
+
+  /**
+   * game/building.cpp: Building::isEnemyBuilding -- neutral counts as enemy,
+   * which is what makes the AI walk towards unowned towns.
+   */
+  isEnemyBuilding(player: Player): boolean {
+    const owner = this.getOwner();
+    if (owner !== null && owner.getIsDefeated()) return false;
+    return player.isEnemy(owner);
+  }
+
+  /** game/building.cpp: Building::getDamage -- what this building does to a unit. */
+  getDamage(unit: unknown): number {
+    const value = this.map.registry[this.buildingID]?.getDamage?.(this, unit, this.map);
+    return typeof value === 'number' ? value : 0;
+  }
+
+  /** game/building.cpp: Building::getBuildingTargets. */
+  getBuildingTargets(): number {
+    const value = this.map.registry[this.buildingID]?.getBuildingTargets?.(this, this.map);
+    // GameEnums::BuildingTarget_All is the C++ fallback.
+    return typeof value === 'number' ? value : 0;
+  }
+
+  /** game/building.cpp: Building::getActionTargetOffset. */
+  getActionTargetOffset(): { x: number; y: number } {
+    const value = this.map.registry[this.buildingID]?.getActionTargetOffset?.(this, this.map);
+    return isPoint(value) ? { x: value.x, y: value.y } : { x: 0, y: 0 };
+  }
+
+  /** game/building.cpp: Building::getActionTargetFields -- null means "no restriction". */
+  getActionTargetFields(): Array<{ x: number; y: number }> | null {
+    const value = this.map.registry[this.buildingID]?.getActionTargetFields?.(this, this.map);
+    if (!Array.isArray(value)) return null;
+    return value.filter(isPoint).map(p => ({ x: p.x, y: p.y }));
+  }
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  return typeof value === 'object' && value !== null
+    && typeof (value as { x?: unknown }).x === 'number'
+    && typeof (value as { y?: unknown }).y === 'number';
 }

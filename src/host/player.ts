@@ -1,11 +1,19 @@
 import { QmlVector } from './qmlvector.ts';
-import { GameEnums } from './enums.ts';
+import { GameEnums, MAX_UNIT_HP } from './enums.ts';
+import { getCircle, type QPoint } from './globals.ts';
 import type { Unit } from './unit.ts';
 import type { GameMap } from './gamemap.ts';
 import type { BuildingHost } from './building.ts';
 
+/** GameEnums::RocketTarget -- what a silo strike is being scored for. */
+export const RocketTarget_Money = 0;
+export const RocketTarget_HpLowMoney = 1;
+export const RocketTarget_HpHighMoney = 2;
+
 export class Player {
   readonly units: Unit[] = [];
+  /** Lazy cache behind getAverageCost(); negative means "not computed yet". */
+  private averageCosts = -1;
   funds = 0;
   team = 0;
   isDefeated = false;
@@ -173,4 +181,108 @@ export class Player {
   setFunds(amount: number): void { this.funds = amount; }
   getMovementcostModifier(): number { return 0; }
   getWeatherMovementCostModifier(): number { return 0; }
+  // --- AI surface -------------------------------------------------------
+
+  /**
+   * game/player.cpp: Player::getAverageCost -- mean getBaseCost over every unit
+   * script, used to split "cheap" from "expensive" when valuing a silo strike.
+   * Lazily cached exactly as the C++ caches m_averageCosts.
+   */
+  getAverageCost(): number {
+    if (this.averageCosts >= 0) return this.averageCosts;
+    let total = 0, count = 0;
+    for (const key of Object.keys(this.map.registry)) {
+      const script = this.map.registry[key];
+      // The same predicate bootstrap's unitIds() uses: a unit script is the
+      // thing that can price itself. UNIT is the shared base, not a unit.
+      if (!/^[A-Z][A-Z0-9_]*$/.test(key)) continue;
+      if (!script || typeof script !== 'object') continue;
+      if (typeof script.getBaseCost !== 'function') continue;
+      if (script === this.map.registry.UNIT) continue;
+      const cost = this.getCosts(key);
+      if (typeof cost === 'number') { total += cost; count++; }
+    }
+    this.averageCosts = count > 0 ? Math.trunc(total / count) : 0;
+    return this.averageCosts;
+  }
+
+  /**
+   * game/player.cpp: Player::getRocketTargetDamage -- value of detonating at
+   * (x, y). Own units count negatively, scaled by ownUnitValue, which is what
+   * stops the AI nuking its own army.
+   */
+  getRocketTargetDamage(
+    x: number, y: number, offsets: QPoint[], damage: number,
+    ownUnitValue = 1, targetType = RocketTarget_Money, ignoreStealthed = false,
+  ): number {
+    const averageCosts = this.getAverageCost();
+    let damageDone = 0;
+    for (const offset of offsets) {
+      const x2 = x + offset.x, y2 = y + offset.y;
+      if (!this.map.onMap(x2, y2)) continue;
+      const unit = this.map.getTerrain(x2, y2).getUnit();
+      if (unit === null) continue;
+      if (unit.isStealthed(this) && !ignoreStealthed) continue;
+      const modifier = this.isEnemyUnit(unit) ? 1 : -ownUnitValue;
+      // A silo cannot take a unit below 1 hp, so overkill is not worth points.
+      const damagePoints = Math.min(damage, unit.getHpRounded());
+      switch (targetType) {
+        case RocketTarget_Money:
+          damageDone += damagePoints / MAX_UNIT_HP * modifier * unit.getCoUnitValue();
+          break;
+        case RocketTarget_HpHighMoney:
+          damageDone += unit.getCosts() >= averageCosts / 2
+            ? damagePoints * modifier * 4 : damagePoints * modifier;
+          break;
+        case RocketTarget_HpLowMoney:
+          damageDone += unit.getCosts() <= averageCosts / 2
+            ? damagePoints * modifier * 4 : damagePoints * modifier;
+          break;
+      }
+    }
+    return Math.trunc(damageDone);
+  }
+
+  /**
+   * game/player.cpp: Player::getSiloRockettarget -- best detonation point and
+   * what it is worth. The C++ returns the point and writes the score through an
+   * out-parameter; here both come back together.
+   *
+   * Ties are broken by `pick` rather than the C++ randInt so a match reproduces;
+   * the default takes the first, and the AI passes its own seeded chooser.
+   */
+  getSiloRockettarget(
+    radius: number, damage: number, ownUnitValue = 1,
+    targetType = RocketTarget_Money, searchArea: QPoint[] | null = null,
+    pick: (count: number) => number = () => 0,
+  ): { x: number; y: number; damage: number } {
+    const offsets = getCircle(0, radius);
+    let highestDamage = -1;
+    const targets: QPoint[] = [];
+    const consider = (x: number, y: number, restricted: boolean) => {
+      const done = this.getRocketTargetDamage(
+        x, y, offsets, damage, ownUnitValue, targetType, restricted);
+      if (done > highestDamage) { highestDamage = done; targets.length = 0; targets.push({ x, y }); }
+      else if (done === highestDamage && highestDamage >= 0) targets.push({ x, y });
+    };
+    if (searchArea === null) {
+      for (let x = 0; x < this.map.getMapWidth(); x++) {
+        for (let y = 0; y < this.map.getMapHeight(); y++) consider(x, y, false);
+      }
+    } else {
+      for (const point of searchArea) consider(point.x, point.y, true);
+    }
+    if (targets.length === 0) return { x: -1, y: -1, damage: highestDamage };
+    const chosen = targets[pick(targets.length) % targets.length];
+    return { x: chosen.x, y: chosen.y, damage: highestDamage };
+  }
+
+  /**
+   * game/player.cpp: Player::getMaxCoCount.
+   *
+   * Zero, not the C++ array size: this build has no COs, so every ported branch
+   * that gates on a CO slot is inert by construction rather than by deletion.
+   */
+  getMaxCoCount(): number { return 0; }
+
 }

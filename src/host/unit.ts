@@ -25,6 +25,10 @@ export class Unit {
   hidden = false;
   ignoreUnitCollision = false;
   hasMoved = false;
+  /** GameEnums::GameAi -- 0 is AiMode_Normal, the only value we produce. */
+  aiMode = 0;
+  /** Higher moves first; 0 keeps the AI's own ordering. */
+  aiPriority = 0;
   capturePoints = 0;
   customRange: unknown[] = [];
   /** Populated by the unit script's loadSprites(). */
@@ -745,4 +749,89 @@ export class Unit {
   getBonusMisfortune(_position: QPoint): number { return 0; }
   getTrueDamage(): number { return 0; }
   getDamageReduction(): number { return 0; }
+
+  // --- AI surface -------------------------------------------------------
+  //
+  // These are Q_INVOKABLE on game/unit.h but were never reached by the unit
+  // scripts, so the host had no reason to carry them until the CoreAI port.
+  // They are transcriptions, not new behaviour -- see src/ai/cw/README.md.
+
+  /** game/unit.cpp: Unit::canMoveOver -- terrain is enterable at all, ignoring range. */
+  canMoveOver(x: number, y: number): boolean {
+    return this.getBaseMovementCosts(x, y, x, y) > 0;
+  }
+
+  /** game/unit.cpp: Unit::getUnitValue -- cost scaled by remaining health. */
+  getUnitValue(): number {
+    return Math.trunc(this.getCosts() * this.hp / MAX_UNIT_HP);
+  }
+
+  /**
+   * game/unit.cpp: Unit::getCoUnitValue.
+   *
+   * A negative rank marks a CO unit in the C++. We never build one, so this
+   * always equals getUnitValue() -- kept so the ported scoring reads 1:1.
+   */
+  getCoUnitValue(): number {
+    const value = this.getUnitValue();
+    return this.rank < 0 ? Math.trunc(value * 1.5) : value;
+  }
+
+  getBaseMovementPoints(): number { return this.baseMovementPoints; }
+
+  /** game/unit.cpp: Unit::hasAction */
+  hasAction(action: string): boolean { return this.getActionList().includes(action); }
+
+  /** The carried units themselves, where getLoadedUnit(i) fetches one. */
+  getLoadedUnits(): Unit[] { return this.loaded; }
+
+  /**
+   * game/unit.cpp: Unit::canTransportUnit.
+   *
+   * Differs from canLoad(): the AI asks this while planning, so it needs the
+   * ignoreLoadingPlace form to tell "wrong kind of cargo" from "full right now",
+   * and it deliberately does not check ownership.
+   */
+  canTransportUnit(unit: Unit, ignoreLoadingPlace = false): boolean {
+    if (!this.getTransportUnits().includes(unit.getUnitID())) return false;
+    return ignoreLoadingPlace || this.getLoadedUnitCount() < this.getLoadingPlace();
+  }
+
+  /**
+   * game/unit.cpp: Unit::getEnvironmentDamage -- damage this unit deals to a
+   * destructible terrain, which is how the AI decides to shoot a forest or a pipe.
+   */
+  getEnvironmentDamage(terrainID: string): number {
+    // Game.environmentDamage inlines the same walk for ACTION_FIRE targeting;
+    // this is the Unit-side entry point the AI uses while scoring.
+    let damage = 0;
+    for (const [hasAmmo, weaponID] of [
+      [this.hasAmmo1(), this.weapon1ID],
+      [this.hasAmmo2(), this.weapon2ID],
+    ] as Array<[boolean, string]>) {
+      if (!hasAmmo || weaponID === '') continue;
+      let value: unknown;
+      try { value = this.map.registry[weaponID]?.getEnviromentDamage?.(terrainID); }
+      catch { continue; /* script gap */ }
+      if (typeof value === 'number' && value > damage) damage = value;
+    }
+    return damage;
+  }
+
+  /**
+   * game/unit.h: Unit::getAiMode / getAiPriority -- per-unit overrides a map
+   * author can set to script an opponent. Nothing in our maps sets them, so
+   * these hold the defaults and keep the ported branches live but inert.
+   */
+  getAiMode(): number { return this.aiMode; }
+  setAiMode(mode: number): void { this.aiMode = mode; }
+  getAiPriority(): number { return this.aiPriority; }
+  setAiPriority(priority: number): void { this.aiPriority = priority; }
+
+  /** game/unit.cpp: Unit::hasTerrainHide -- hidden in woods/reef under fog. */
+  hasTerrainHide(player: Player): boolean {
+    if (this.map.getGameRules().getFogMode() === 0) return false;
+    if (player.getFieldVisible(this.x, this.y)) return false;
+    return this.getTerrain().getVisionHide(player) && this.useTerrainHide();
+  }
 }

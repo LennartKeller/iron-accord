@@ -47,11 +47,6 @@ export function makeGlobals(rng: Rng) {
     isEven: (value: number) => value % 2 === 0,
     roundUp: (value: number) => Math.ceil(value),
     roundDown: (value: number) => Math.floor(value),
-    /**
-     * coreengine/globalutils.cpp: GlobalUtils::getCircle — every offset whose
-     * manhattan distance falls within [min, max]. Weapon ranges are built from
-     * this, so it must include the ring bounds.
-     */
     getEmptyPointArray: () => new PointVector([]),
     getDistance: (a: QPoint | number, b: QPoint | number, c?: number, d?: number) => {
       if (typeof a === 'number') return Math.abs(a - (b as number)) + Math.abs((c ?? 0) - (d ?? 0));
@@ -77,17 +72,27 @@ export function makeGlobals(rng: Rng) {
       }
       return new PointVector(points);
     },
-    getCircle: (min: number, max: number) => {
-      const points: QPoint[] = [];
-      for (let x = -max; x <= max; x++) {
-        for (let y = -max; y <= max; y++) {
-          const distance = Math.abs(x) + Math.abs(y);
-          if (distance >= min && distance <= max) points.push({ x, y });
-        }
-      }
-      return new PointVector(points);
-    },
+    getCircle: (min: number, max: number) => new PointVector(getCircle(min, max)),
   };
+}
+
+/**
+ * coreengine/globalutils.cpp: GlobalUtils::getCircle -- every offset whose
+ * manhattan distance falls within [min, max]. Weapon ranges are built from
+ * this, so it must include the ring bounds.
+ *
+ * Exported as a plain function as well as through makeGlobals: the ported
+ * CoreAI needs it outside any script sandbox.
+ */
+export function getCircle(min: number, max: number): QPoint[] {
+  const points: QPoint[] = [];
+  for (let x = -max; x <= max; x++) {
+    for (let y = -max; y <= max; y++) {
+      const distance = Math.abs(x) + Math.abs(y);
+      if (distance >= min && distance <= max) points.push({ x, y });
+    }
+  }
+  return points;
 }
 
 /** Minimal QmlVectorPoint stand-in for the point lists scripts iterate. */
