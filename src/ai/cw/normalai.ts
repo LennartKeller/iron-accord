@@ -5,6 +5,7 @@ import type { Game } from '../../game/game.ts';
 import type { BuildingHost, Player, Unit } from '../../host/index.ts';
 import { computeMovementRange, key } from '../../game/pathfinding.ts';
 import { CoreAI } from './coreai.ts';
+import { ProductionSystem } from './production.ts';
 import { CwAction, isRefuelUnit } from './actions.ts';
 import { NORMAL_AI_DEFAULTS, type NormalAiConfig } from './config.ts';
 import { InfluenceFrontMap } from './influencefrontmap.ts';
@@ -85,11 +86,21 @@ export class NormalAi implements Agent {
   private rngState: number;
   /** Far-away capture targets already claimed this turn. */
   private usedFarAwayBuildings: Point[] = [];
+  /**
+   * Built once per game, not per turn: upstream's m_productionSystem is a
+   * member of the AI, initialised at game start. Rebuilding it each turn resets
+   * the opening infantry batch, and the AI then buys six more infantry every
+   * single turn and never reaches the rest of the distribution.
+   */
+  private readonly production: ProductionSystem;
+  /** Whether a unit id can leave a given factory; see canBuildHere. */
+  private readonly mobility = new Map<string, boolean>();
 
   constructor(options: NormalAiOptions = {}) {
     this.config = { ...NORMAL_AI_DEFAULTS, ...options.config };
     this.name = options.name ?? 'normalai';
     this.rngState = (options.seed ?? 1) >>> 0 || 1;
+    this.production = new ProductionSystem(() => this.random());
   }
 
   /** xorshift32, so tie-breaks reproduce from a seed. */
@@ -735,84 +746,48 @@ export class NormalAi implements Agent {
   }
 
   /**
-   * The production rung.
+   * ai/normalai.cpp: NormalAi::buildUnits, through the ported production system.
    *
-   * NOT a port of SimpleProductionSystem -- that is 1,400 lines of C++ driven
-   * by group definitions in `__coreai.js`, and that file does not parse (see
-   * README.md), so upstream's own production callbacks throw. Porting a system
-   * whose configuration is broken upstream would reproduce the breakage, not
-   * the design.
-   *
-   * What this does instead is deliberately small and readable: buy whatever
-   * most improves our answer to what the enemy actually has, using the ported
-   * damage prediction to measure it, with a standing preference for enough
-   * infantry to take ground. Phase 4 replaces it.
+   * The system buys toward a target army composition rather than picking a
+   * favourite unit, so what to buy depends on what is already fielded. A unit
+   * that could not leave the factory is refused outright -- that check is the
+   * one whose absence produced the piperunner stalemate.
    */
   private buildUnits(
-    game: Game, player: Player, buildings: BuildingHost[], enemyUnits: Unit[],
+    game: Game, player: Player, buildings: BuildingHost[], _enemyUnits: Unit[],
   ): ActionDescriptor | null {
-    const core = this.core!;
-    let best: { at: Point; unitId: string; score: number } | null = null;
+    const production = this.production;
+    const owned = buildings.filter(building => building.getOwner() === player);
+    if (!production.ready) production.initialize(player, owned);
+    production.updateActive(owned);
 
-    for (const building of buildings) {
-      const x = building.getX(), y = building.getY();
-      if (!game.canProduceAt(x, y)) continue;
-      for (const option of game.buildOptions(building)) {
-        if (!option.affordable) continue;
-        const score = this.productionScore(game, player, option.id, { x, y }, enemyUnits);
-        if (score <= 0) continue;
-        if (best === null || score > best.score) {
-          best = { at: { x, y }, unitId: option.id, score };
-        }
-      }
-    }
-    if (best === null) {
-      this.aiStep = AISteps.buildUnits + 1;
-      return null;
-    }
-    void core;
-    return { kind: 'build', at: best.at, unitId: best.unitId };
+    const action = production.buildNextUnit(
+      game, player, owned, player.units,
+      (at, unitId) => this.canBuildHere(game, player, at, unitId));
+    if (action === null) this.aiStep = AISteps.buildUnits + 1;
+    return action;
   }
 
-  /**
-   * How much buying `unitId` here is worth.
-   *
-   * The matchup term is the honest part: probe the unit and ask the ported
-   * predictor what it does to each visible enemy and what each does back,
-   * weighted by their costs. Everything else is a small nudge.
-   */
-  private productionScore(
-    game: Game, player: Player, unitId: string, at: Point, enemyUnits: Unit[],
-  ): number {
+  /** Affordable, offered by this factory, and able to actually leave it. */
+  private canBuildHere(game: Game, player: Player, at: Point, unitId: string): boolean {
+    if (!game.canProduceAt(at.x, at.y)) return false;
+    const building = game.map.getTerrain(at.x, at.y).getBuilding();
+    if (building === null) return false;
+    if (!game.buildOptions(building).some(o => o.id === unitId && o.affordable)) return false;
+
     const map = game.map;
+    const cacheKey = `${unitId}@${at.x},${at.y}`;
+    const cached = this.mobility.get(cacheKey);
+    if (cached !== undefined) return cached;
+    // A probe consumes a uid, and a uid the real game never issued
+    // desynchronises every later action, so the counter is rewound.
     const uidBefore = map.getUnitUidCounter();
     const probe = map.addUnit(unitId, player, at.x, at.y);
-    try {
-      // A unit that cannot leave the factory blocks it forever. This is the
-      // check whose absence produced the piperunner stalemate.
-      if (computeMovementRange(map, probe).tiles.size <= 1) return 0;
-
-      const cost = player.getCosts(unitId);
-      let matchup = 0;
-      for (const enemy of enemyUnits) {
-        const ours = this.core!.predictor.getBaseDamage(probe, enemy);
-        const theirs = this.core!.predictor.getBaseDamage(enemy, probe);
-        matchup += Math.max(0, ours) * enemy.getCosts() - Math.max(0, theirs) * cost;
-      }
-      // Scaled so a good matchup outweighs price, without price being ignored.
-      let score = cost / 12 + matchup / 8000;
-
-      const canCapture = probe.getActionList().includes(CwAction.CAPTURE);
-      const capturers = player.units.filter(unit => unit.canCapture()).length;
-      if (canCapture && capturers < 3) score += 900;
-      if (!canCapture && capturers >= 3) score += 200;
-      // Spend the bank rather than dribbling out the cheapest thing available.
-      if (cost > player.getFunds() * 0.6) score += 150;
-      return score;
-    } finally {
-      map.removeUnit(probe);
-      map.setUnitUidCounter(uidBefore);
-    }
+    const mobile = computeMovementRange(map, probe).tiles.size > 1;
+    map.removeUnit(probe);
+    map.setUnitUidCounter(uidBefore);
+    this.mobility.set(cacheKey, mobile);
+    return mobile;
   }
 
   /**

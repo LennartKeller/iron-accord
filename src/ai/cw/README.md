@@ -63,6 +63,8 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `scoring.ts` | `calculateCounterDamage` / `getOwnSupportDamage` / `getBestAttackTarget` |
 | `movement.ts` | `getClosestReachableMovePath` / `getMoveTargetField` / `moveToSafety` |
 | `normalai.ts` | `NormalAi`'s step ladder, as an `Agent` |
+| `groups.ts` | generated from `__coreai.js`'s build-group tables |
+| `production.ts` | `ai/productionSystem/simpleproductionsystem.cpp` |
 
 Every rung of `performActionSteps` is ported except the CO and Black Hole
 branches that do not apply here: `buildCOUnit`, `moveFlares`, `moveOoziums` and
@@ -167,10 +169,14 @@ One character fixes it (`=` to `:`). Two consequences for this port:
 
 - `HIGH_PRIO_BUILDINGS` in `normalai.ts` is hard-coded to `["FACTORY"]`, which
   is what the script would have returned.
-- Porting `SimpleProductionSystem` is worth much less than its 1,400 lines
-  suggest, because the group definitions that configure it live in the file
-  that does not load. The current production rung is a small, documented
-  stand-in rather than a port of a system whose configuration is broken.
+- `SimpleProductionSystem`'s *algorithm* is ported (`production.ts`), but the
+  JS layer that configures it is not run. Building a bridge for a file that does
+  not parse buys nothing, so `tools/gen_cw_ai_groups.py` applies the repair in
+  memory, evaluates the file with Node and emits the group tables as
+  `groups.ts`. The configuration path around them reduces cleanly without COs:
+  every CO modifier is 1 and the direct/indirect ratio modifier is 1, leaving
+  each group's own distribution scaled only by the ground/air/naval balance.
+  `ext/` is never modified.
 
 ## Determinism
 
@@ -180,3 +186,21 @@ That rng instance is the one wired into the script globals, so a *different*
 `Mulberry32` leaves the scripts on the shared stream and combat luck carries over
 between episodes -- four runs of one seed then differ. Every tool under `tools/`
 already does this correctly.
+
+## Production is a composition, not a shopping list
+
+Each build group owns a target share of the army, and every turn the AI buys
+from whichever group sits furthest *below* its share. That is what stops a game
+being spent on one unit type -- and it is the mechanism the piperunner stalemate
+was missing, together with the refusal to buy anything that cannot leave the
+factory.
+
+The system is created once per game rather than per turn. Rebuilding it each
+turn resets the opening six-infantry batch, and the AI then buys six more
+infantry every turn and never reaches the rest of the distribution: the army
+comes out 21 infantry and nothing else. With it built once, the same match
+fields infantry, light and heavy tanks, artillery, a megatank and a neotank.
+
+Whether the air and naval groups apply is decided by what our factories can
+actually build, not by the map's filter flags -- the flags only exist on newer
+map versions, and "can I build a ship" is what the modifier is really asking.

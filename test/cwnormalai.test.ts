@@ -81,6 +81,20 @@ describe('NormalAi', () => {
     expect(await run()).toBe(await run());
   });
 
+  it('buys a mixed army rather than one favourite unit', async () => {
+    const env = environment(3);
+    await playMatch(env, [new NormalAi({ seed: 3 }), new RandomAgent(11)], { maxSteps: 8000 });
+    const player = env.game.map.getPlayer(0)!;
+    const kinds = new Set(player.units.map(unit => unit.getUnitID()));
+
+    // The production system buys toward a target composition, so an army that
+    // is all one unit means the distribution is not being consulted -- which is
+    // exactly what happened while the system was rebuilt every turn and its
+    // opening infantry batch kept resetting.
+    expect(player.units.length).toBeGreaterThan(4);
+    expect(kinds.size).toBeGreaterThanOrEqual(3);
+  });
+
   it('keeps its factories producing rather than blocking them', async () => {
     const env = environment(8);
     const ai = new NormalAi({ seed: 8 });
