@@ -14,7 +14,12 @@ const clamp = (value: number, min: number, max: number) =>
  */
 export class Unit {
   hp = 10;
-  virtualHp = 10;
+  /**
+   * game/unit.h: m_virtualHp -- a temporary override the AI sets while scoring
+   * a hypothetical exchange. Zero means "no override", which is why it starts
+   * there and why clearing it is a write of zero rather than of the real hp.
+   */
+  virtualHp = 0;
   ammo1 = 0; maxAmmo1 = 0; weapon1ID = '';
   ammo2 = 0; maxAmmo2 = 0; weapon2ID = '';
   fuel = 0; maxFuel = 0;
@@ -110,7 +115,12 @@ export class Unit {
   setCursorInfoRange(v: number) { this.cursorInfoRange = v; }
   setHidden(v: boolean) { this.hidden = v; }
   setIgnoreUnitCollision(v: boolean) { this.ignoreUnitCollision = v; }
-  setHp(v: number) { this.hp = Math.min(v, MAX_UNIT_HP); this.virtualHp = this.hp; }
+  /**
+   * game/unit.cpp: Unit::setHp. It deliberately does not touch virtualHp --
+   * keeping the two in sync masked the fallback below, so a cleared override
+   * read as zero hp instead of as "no override".
+   */
+  setHp(v: number) { this.hp = Math.min(v, MAX_UNIT_HP); }
   setVirtualHpValue(v: number) { this.virtualHp = v; }
   setCapturePoints(v: number) { this.capturePoints = v; }
   setHasMoved(v: boolean) { this.hasMoved = v; }
@@ -143,7 +153,17 @@ export class Unit {
   getMaxFuel(): number { return this.maxFuel; }
   getHp(): number { return this.hp; }
   getHpRounded(): number { return Math.ceil(this.hp); }
-  getVirtualHp(): number { return this.virtualHp; }
+  /**
+   * game/unit.cpp: Unit::getVirtualHp -- the override when one is set, the real
+   * hp otherwise.
+   *
+   * The fallback is the whole point and was missing. ACTION_FIRE computes real
+   * battle damage from this, and CoreAI clears its scoring override by writing
+   * zero, so without the fallback every unit the AI had considered attacking
+   * fought on as though it had no health at all. That desynchronised the board
+   * from the actions that produced it and made the games unreplayable.
+   */
+  getVirtualHp(): number { return this.virtualHp > 0 ? this.virtualHp : this.hp; }
   getVirtualHpValue(): number { return this.virtualHp; }
   getTerrain(): Terrain { return this.map.getTerrain(this.x, this.y); }
   getWeatherImmune(): boolean { return false; }

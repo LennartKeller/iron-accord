@@ -1,5 +1,6 @@
 import { BrowserEvaluator } from '../scripts/evaluator-browser.ts';
 import { loadScripts, type LoadReport } from '../scripts/loader.ts';
+import { applyScriptRepairs } from '../scripts/repairs.ts';
 import type { ScriptRegistry } from '../scripts/types.ts';
 import {
   GameEnums, Qt, qsTr, makeGlobals, makeAnimationStubs, Mulberry32, AnimationRunner,
@@ -54,6 +55,7 @@ export async function bootstrapBrowser(bundleUrl = '/scripts.json', seed = 0xC0F
     bundle.order.map(path => ({ path, source: bundle.sources[path] })),
   );
 
+  applyScriptRepairs(evaluator.global);
   animations.attach(evaluator.global);
   return { registry: evaluator.global, report, animations, rng };
 }

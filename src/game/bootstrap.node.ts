@@ -1,5 +1,6 @@
 import { NodeEvaluator } from '../scripts/evaluator-node.ts';
 import { loadScripts, type LoadReport } from '../scripts/loader.ts';
+import { applyScriptRepairs } from '../scripts/repairs.ts';
 import type { ScriptRegistry } from '../scripts/types.ts';
 export { vocabulary } from '../scripts/vocabulary.ts';
 import { collectScripts, type CollectOptions } from '../cw/resources.node.ts';
@@ -40,6 +41,7 @@ export function bootstrap(options: CollectOptions & { seed?: number } = {}): Boo
 
   const report = loadScripts(evaluator, NodeEvaluator.parse, collectScripts(options));
   const registry = evaluator.global;
+  applyScriptRepairs(registry);
   animations.attach(registry);
 
   return {
