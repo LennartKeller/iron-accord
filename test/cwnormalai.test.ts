@@ -95,6 +95,29 @@ describe('NormalAi', () => {
     expect(kinds.size).toBeGreaterThanOrEqual(3);
   });
 
+  it('degenerates to infantry-only if rebuilt every turn', async () => {
+    // The production system opens with six infantry and then works toward a
+    // composition, so the agent MUST be kept across turns. A caller that
+    // rebuilds it per turn resets that opening batch forever and buys nothing
+    // else -- which is exactly what a mismatched cache key did in the web app.
+    // This pins the invariant so the next caller to hold it wrongly has a test
+    // telling them why.
+    const env = environment(3);
+    const fresh = {
+      name: 'rebuilt-every-turn',
+      selectAction: (e: GameEnvironment) => new NormalAi({ seed: 3 }).selectAction(e),
+    };
+    await playMatch(env, [fresh, new RandomAgent(11)], { maxSteps: 8000 });
+    const kinds = new Set(env.game.map.getPlayer(0)!.units.map(unit => unit.getUnitID()));
+    expect(kinds.size).toBeLessThanOrEqual(2);
+
+    // The same agent kept across the match fields a real mix.
+    const kept = environment(3);
+    await playMatch(kept, [new NormalAi({ seed: 3 }), new RandomAgent(11)], { maxSteps: 8000 });
+    const keptKinds = new Set(kept.game.map.getPlayer(0)!.units.map(unit => unit.getUnitID()));
+    expect(keptKinds.size).toBeGreaterThan(kinds.size);
+  });
+
   it('keeps its factories producing rather than blocking them', async () => {
     const env = environment(8);
     const ai = new NormalAi({ seed: 8 });

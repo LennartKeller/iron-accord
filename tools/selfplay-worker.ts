@@ -21,7 +21,10 @@ import { BudgetedValueNet } from '../src/ai/onnx-evaluator.ts';
 import { loadValueNet } from '../src/ai/valuenet.node.ts';
 import { HeuristicEvaluator } from '../src/ai/evaluator.ts';
 import type { Evaluator } from '../src/ai/evaluator.ts';
-import { GameEnvironment, HeuristicAgent, PlannerAgent, RandomAgent, playMatch } from '../src/ai/index.ts';
+import { GameEnvironment, HeuristicAgent, NormalAi, PlannerAgent, RandomAgent, playMatch } from '../src/ai/index.ts';
+import { NORMAL_AI_DEFAULTS } from '../src/ai/cw/config.ts';
+import { randomizeConfig } from '../src/ai/cw/ini.ts';
+import { Mulberry32 } from '../src/host/index.ts';
 import type { Agent } from '../src/ai/index.ts';
 import type { ActionDescriptor } from '../src/ai/actions.ts';
 
@@ -41,6 +44,16 @@ export interface Job {
   replyActions?: number;
   /** ONNX value net for planner seats; empty uses the hand-priced evaluation. */
   model?: string;
+  /**
+   * Per-knob chance of mutating a normalai seat's tunables, 0 for the shipped
+   * profile. Upstream's own variant generator uses 1.
+   */
+  aiChance?: number;
+  /**
+   * Below zero resamples each mutated knob uniformly across its range, which is
+   * what upstream does; at or above zero it nudges by up to that percentage.
+   */
+  aiMutation?: number;
 }
 
 export interface Replay {
@@ -84,6 +97,19 @@ function agentFor(name: string, seed: number, job: Job): Agent {
     });
   }
   if (name === 'random') return new RandomAgent(seed);
+  if (name === 'normalai') {
+    // A different opponent per seat per game, which is the whole point of using
+    // it as a generator: one fixed policy converges and the position
+    // distribution narrows, which is what sank generating from the planner.
+    // Seeded from the job so a replay still reproduces exactly.
+    const chance = job.aiChance ?? 0;
+    const config = chance > 0
+      ? randomizeConfig(
+        (() => { const rng = new Mulberry32(seed); return () => rng.next(); })(),
+        chance, job.aiMutation ?? -1, NORMAL_AI_DEFAULTS)
+      : NORMAL_AI_DEFAULTS;
+    return new NormalAi({ seed, config });
+  }
   // Exploration is seeded from the job so a generated game stays reproducible.
   return new HeuristicAgent({}, 'heuristic', epsilonFor);
 }

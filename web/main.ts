@@ -76,24 +76,37 @@ let env: GameEnvironment | null = null;
 const AGENTS: Record<string, () => Agent> = {
   heuristic: () => new HeuristicAgent(),
   // Seeded per battle rather than fixed, so repeat games are not identical.
-  commanderwars: () => new NormalAi({ seed: (Math.random() * 0x7fffffff) >>> 0 || 1 }),
+  commanderwars: () => new NormalAi({
+    name: 'commanderwars',
+    // Seeded per battle rather than fixed, so repeat games are not identical.
+    seed: (Math.random() * 0x7fffffff) >>> 0 || 1,
+  }),
   // A visible turn should not stall on a phone, so the search is kept short.
   planner: () => new PlannerAgent({ timeBudgetMs: 250 }),
   // Same search, learned position evaluation. The model loads on first use.
   valuenet: () => new ValueNetAgent(250),
 };
 
-const agents = new Map<number, Agent>();
+const agents = new Map<number, { key: string; agent: Agent }>();
 
-/** The agent for a seat, built once and kept so its memory survives the turn. */
+/**
+ * The agent for a seat, built once and kept so its memory survives the turn.
+ *
+ * Keyed on the registry name rather than on `agent.name`. Those matched only by
+ * convention, and when they did not the seat was rebuilt on every single call:
+ * an agent that carries state across a turn then loses it constantly. NormalAi
+ * showed it plainly -- its production system opens with six infantry, so a
+ * per-call rebuild bought six infantry every turn and never reached the rest of
+ * the build distribution.
+ */
 function agentFor(seat: number): Agent {
   const wanted = config?.seats[seat]?.agent ?? 'heuristic';
   let existing = agents.get(seat);
-  if (!existing || existing.name !== wanted) {
-    existing = (AGENTS[wanted] ?? AGENTS.heuristic)();
+  if (!existing || existing.key !== wanted) {
+    existing = { key: wanted, agent: (AGENTS[wanted] ?? AGENTS.heuristic)() };
     agents.set(seat, existing);
   }
-  return existing;
+  return existing.agent;
 }
 /** Set while the AI is playing, so taps do not fight it for control. */
 let aiRunning = false;

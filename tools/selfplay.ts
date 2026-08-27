@@ -45,6 +45,16 @@ const plannerNodes = Number(arg('plannerNodes', '0'));
 const model = arg('model', '');
 /** Opponent-reply actions for planner seats; -1 keeps the planner default. */
 const replyActions = Number(arg('reply', '-1'));
+/**
+ * Tunable mutation for `normalai` seats.
+ *
+ * Commander Wars generates its own AI variants with (chance 1, mutation -1):
+ * touch every knob, resample each uniformly across its declared range. That is
+ * the diversity lever this project's experiments keep pointing at -- a family
+ * of distinct opponents rather than one policy played over and over.
+ */
+const aiChance = Number(arg('aiChance', '0'));
+const aiMutation = Number(arg('aiMutation', '-1'));
 // Leave a core for the OS and this process; oversubscribing slows everything.
 const workerCount = Math.max(1, Math.min(Number(arg('workers', '0')) || os.availableParallelism() - 2, games));
 
@@ -84,6 +94,8 @@ function* jobs(): Generator<Job> {
       plannerNodes,
       model,
       replyActions,
+      aiChance,
+      aiMutation,
     };
   }
 }
