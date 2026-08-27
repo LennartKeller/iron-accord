@@ -64,6 +64,10 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `movement.ts` | `getClosestReachableMovePath` / `getMoveTargetField` / `moveToSafety` |
 | `normalai.ts` | `NormalAi`'s step ladder, as an `Agent` |
 
+The ladder now runs capture, fire, repair, move, load, ferry, clear-production
+and build. Only `refillUnits`, `moveSupport` and `joinCaptureBuildings` are
+still missing from `performActionSteps`.
+
 Regenerate the config after updating `ext/` with:
 
     python3 tools/gen_cw_ai_config.py

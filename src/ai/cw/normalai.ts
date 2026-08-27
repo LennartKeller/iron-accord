@@ -16,7 +16,10 @@ import {
   appendTerrainBuildingAttackTargets, getClosestReachableMovePath, getMoveTargetField,
   hasTargets, moveToSafety, type Point,
 } from './movement.ts';
-import { appendCaptureTransporterTargets, appendTransporterTargets } from './transport.ts';
+import {
+  appendCaptureTransporterTargets, appendLoadingTargets, appendNearestUnloadTargets,
+  appendTransporterTargets, appendUnloadTargetsForAttacking, appendUnloadTargetsForCapturing,
+} from './transport.ts';
 
 /**
  * ai/coreai.h: CoreAI::AISteps -- the rungs of the turn, in order.
@@ -274,6 +277,14 @@ export class NormalAi implements Agent {
         game, player, buildings, enemyBuildings, enemyUnits, 2, Number.MAX_SAFE_INTEGER);
       if (moved !== null) return moved;
     }
+    if (this.aiStep <= AISteps.loadUnits) {
+      const loaded = this.loadUnits(game, buildings, enemyBuildings);
+      if (loaded !== null) return loaded;
+    }
+    if (this.aiStep <= AISteps.moveTransporters) {
+      const ferried = this.moveTransporters(game, buildings, enemyBuildings, enemyUnits);
+      if (ferried !== null) return ferried;
+    }
     if (this.aiStep <= AISteps.moveAway) {
       const cleared = this.moveAwayFromProduction(game);
       if (cleared !== null) return cleared;
@@ -283,6 +294,194 @@ export class NormalAi implements Agent {
       if (built !== null) return built;
     }
     this.aiStep = AISteps.buildUnits + 1;
+    return null;
+  }
+
+  /**
+   * ai/normalai.cpp: NormalAi::loadUnits -- get passengers aboard.
+   *
+   * Only units that carry nothing themselves board: getLoadingPlace() == 0 is
+   * upstream's test for "this is cargo, not a carrier".
+   */
+  private loadUnits(
+    game: Game, buildings: BuildingHost[], enemyBuildings: BuildingHost[],
+  ): ActionDescriptor | null {
+    this.aiStep = AISteps.loadUnits;
+    for (const data of this.ownUnits) {
+      if (data.nextAiStep > this.aiFunctionStep) continue;
+      const unit = data.unit;
+      data.nextAiStep++;
+      if (unit.getHasMoved() || data.range === null) continue;
+      if (unit.getLoadingPlace() !== 0) continue;
+
+      const transporterTargets: MoveTargetField[] = [];
+      appendTransporterTargets(unit, this.ownUnits.map(other => other.unit), transporterTargets);
+      if (transporterTargets.length === 0) continue;
+      const move = this.moveUnit(
+        game, data, [...transporterTargets], transporterTargets, buildings, enemyBuildings, false);
+      if (move !== null) return move;
+    }
+    this.aiFunctionStep++;
+    return null;
+  }
+
+  /**
+   * ai/normalai.cpp: NormalAi::moveTransporters.
+   *
+   * A loaded transport heads for somewhere its cargo can do something -- a
+   * capture first, an attack second, and failing both simply the nearest shore
+   * that reaches an enemy island. An empty one goes to pick somebody up.
+   */
+  private moveTransporters(
+    game: Game, buildings: BuildingHost[], enemyBuildings: BuildingHost[], enemyUnits: Unit[],
+  ): ActionDescriptor | null {
+    this.aiStep = AISteps.moveTransporters;
+    const core = this.core!;
+    const ownUnits = this.ownUnits.map(other => other.unit);
+
+    for (const data of this.ownUnits) {
+      if (data.nextAiStep > this.aiFunctionStep) continue;
+      const unit = data.unit;
+      data.nextAiStep++;
+      if (unit.getHasMoved() || data.range === null) continue;
+      if (unit.getLoadingPlace() <= 0) continue;
+
+      if (unit.getLoadedUnitCount() > 0) {
+        const targets: MoveTargetField[] = [];
+        const cargo = unit.getLoadedUnits();
+        if (cargo.some(carried => carried.getActionList().includes(CwAction.CAPTURE))) {
+          appendUnloadTargetsForCapturing(core, unit, ownUnits, enemyBuildings, targets);
+        } else if (cargo.some(carried => carried.getActionList().includes(CwAction.FIRE))) {
+          appendUnloadTargetsForAttacking(core, unit, enemyUnits, targets, 1);
+        }
+        if (targets.length === 0) appendUnloadTargetsForAttacking(core, unit, enemyUnits, targets, 3);
+        if (targets.length === 0) {
+          appendNearestUnloadTargets(core, unit, enemyUnits, enemyBuildings, targets);
+        }
+        const move = this.moveToUnloadArea(game, data, targets, buildings, enemyBuildings, enemyUnits);
+        if (move !== null) return move;
+      } else {
+        const targets: MoveTargetField[] = [];
+        core.appendCaptureTargets(data.actions, unit, enemyBuildings, targets, 1);
+        const withTargets = (loadingUnit: Unit, canCapture: boolean, idx: number, island: number) =>
+          hasTargets(core, unit.getMovementpoints({ x: unit.getX(), y: unit.getY() }),
+            loadingUnit, canCapture, enemyUnits, enemyBuildings, idx, island, false);
+        appendLoadingTargets(core, unit, ownUnits, enemyUnits, enemyBuildings,
+          false, false, targets, false, 5, false, withTargets);
+        if (targets.length === 0) {
+          appendLoadingTargets(core, unit, ownUnits, enemyUnits, enemyBuildings,
+            true, false, targets, false, 5, false, withTargets);
+        }
+        if (targets.length === 0) continue;
+        const move = this.moveUnit(game, data, targets, [], buildings, enemyBuildings, false);
+        if (move !== null) return move;
+      }
+    }
+    this.aiFunctionStep++;
+    return null;
+  }
+
+  /**
+   * ai/normalai.cpp: NormalAi::moveToUnloadArea -- drive to the shore and, if
+   * we have actually arrived, put somebody off.
+   */
+  private moveToUnloadArea(
+    game: Game, data: MoveUnitData, targets: MoveTargetField[],
+    buildings: BuildingHost[], enemyBuildings: BuildingHost[], enemyUnits: Unit[],
+  ): ActionDescriptor | null {
+    if (targets.length === 0) return null;
+    const unit = data.unit;
+    const pfs = new TargetedUnitPathFindingSystem(game.map, unit, targets, {
+      moveCostMap: this.core!.moveCostMap,
+    });
+    const movepoints = unit.getMovementpoints({ x: unit.getX(), y: unit.getY() });
+    const field = pfs.getReachableTargetField(movepoints);
+    if (field.x < 0) return null;
+
+    // Only unload once we are standing on the tile we were aiming for; short of
+    // that, keep driving.
+    const arrived = targets.some(t => t.x === field.x && t.y === field.y);
+    if (arrived) {
+      const unload = this.unloadUnits(game, data, field, enemyUnits);
+      if (unload !== null) return unload;
+    }
+    return this.moveUnit(game, data, targets, targets, buildings, enemyBuildings, true);
+  }
+
+  /**
+   * ai/transporterselector.cpp: choose which passenger to drop and where.
+   *
+   * Preference order is upstream's: a passenger with exactly one legal drop tile
+   * goes first, then a capturing unit that can be put directly onto an enemy
+   * building. Failing both, drop the first passenger nearest the enemy.
+   */
+  private unloadUnits(
+    game: Game, data: MoveUnitData, at: Point, enemyUnits: Unit[],
+  ): ActionDescriptor | null {
+    const unit = data.unit;
+    if (!this.canPerform(game, unit, at, CwAction.UNLOAD)) return null;
+    const cargo = game.cargoOf(unit);
+    if (cargo.length === 0) return null;
+
+    const drops = cargo.map(entry => ({
+      entry,
+      fields: game.unloadTargets(unit, entry.index),
+    })).filter(candidate => candidate.fields.length > 0
+      && !this.core!.needsRefuel(candidate.entry.unit));
+    if (drops.length === 0) return null;
+
+    const single = drops.find(candidate => candidate.fields.length === 1);
+    if (single !== undefined) {
+      return this.unloadDescriptor(game, unit, at, single.entry.index, single.fields[0]);
+    }
+    for (const candidate of drops) {
+      if (!candidate.entry.unit.getActionList().includes(CwAction.CAPTURE)) continue;
+      const onBuilding = candidate.fields.find(field => {
+        const building = game.map.getTerrain(field.x, field.y).getBuilding();
+        return building !== null && this.core!.player.isEnemy(building.getOwner());
+      });
+      if (onBuilding !== undefined) {
+        return this.unloadDescriptor(game, unit, at, candidate.entry.index, onBuilding);
+      }
+    }
+    // Fallback: put the first passenger down as close to the enemy as we can.
+    const first = drops[0];
+    let best = first.fields[0], bestDistance = Number.MAX_SAFE_INTEGER;
+    for (const field of first.fields) {
+      let nearest = Number.MAX_SAFE_INTEGER;
+      for (const enemy of enemyUnits) {
+        const distance = Math.abs(field.x - enemy.getX()) + Math.abs(field.y - enemy.getY());
+        if (distance < nearest) nearest = distance;
+      }
+      if (nearest < bestDistance) { bestDistance = nearest; best = field; }
+    }
+    return this.unloadDescriptor(game, unit, at, first.entry.index, best);
+  }
+
+  /**
+   * ACTION_UNLOAD as a descriptor.
+   *
+   * With one passenger the action goes straight to picking a tile; with several
+   * it asks which passenger first, so the step list is one longer.
+   */
+  private unloadDescriptor(
+    game: Game, unit: Unit, at: Point, cargoIndex: number, field: Point,
+  ): ActionDescriptor | null {
+    const probe = game.probeAction(CwAction.UNLOAD, unit, at);
+    if (probe.kind === 'field') {
+      return {
+        kind: 'unit', uid: unit.uid, actionId: CwAction.UNLOAD,
+        to: { x: at.x, y: at.y }, steps: [{ x: field.x, y: field.y }],
+      };
+    }
+    if (probe.kind === 'menu') {
+      const entry = probe.entries[cargoIndex] ?? probe.entries[0];
+      if (entry === undefined) return null;
+      return {
+        kind: 'unit', uid: unit.uid, actionId: CwAction.UNLOAD,
+        to: { x: at.x, y: at.y }, steps: [entry.actionID, { x: field.x, y: field.y }],
+      };
+    }
     return null;
   }
 

@@ -428,6 +428,82 @@ export function appendSupportTargets(
   }
 }
 
+/**
+ * ai/coreai.cpp: CoreAI::appendLoadingTargets -- tiles where this transport
+ * could pick somebody up.
+ *
+ * The `found` flag reads backwards at first glance: it means "this passenger
+ * already has work where it stands", and only when it does NOT is a loading
+ * tile searched for. A transport should not ferry a unit that has something to
+ * do on its own island.
+ *
+ * Returns the passengers a tile was found for, in the order they were matched.
+ */
+export function appendLoadingTargets(
+  ai: CoreAI, unit: Unit, units: readonly Unit[],
+  enemyUnits: readonly Unit[], enemyBuildings: readonly BuildingHost[],
+  addCaptureTargets: boolean, virtualLoading: boolean,
+  targets: MoveTargetField[], all: boolean, distanceModifier = 1, onlyTrueIslands = false,
+  hasTargetsFor?: (loadingUnit: Unit, canCapture: boolean, islandIdx: number, island: number) => boolean,
+): Unit[] {
+  const unitIslandIdx = ai.getIslandIndex(unit);
+  const unitIsland = ai.getIsland(unit);
+  const transportUnits: Unit[] = [];
+  const currentPos = { x: unit.getX(), y: unit.getY() };
+  const transporterMovement = unit.getMovementpoints(currentPos);
+  if (transporterMovement <= 0) return transportUnits;
+
+  for (const loadingUnit of units) {
+    if (loadingUnit === unit || loadingUnit.getHp() <= 0) continue;
+    if (!unit.canTransportUnit(loadingUnit, virtualLoading)) continue;
+
+    let found = false;
+    const canCapture = loadingUnit.getActionList().includes(CwAction.CAPTURE);
+    const loadingIslandIdx = ai.getIslandIndex(loadingUnit);
+    const loadingIsland = ai.getIsland(loadingUnit);
+    let localDistanceModifier = distanceModifier;
+
+    if (addCaptureTargets && canCapture) {
+      const distance = hasCaptureTarget(
+        ai, loadingUnit, canCapture, enemyBuildings, loadingIslandIdx, loadingIsland, onlyTrueIslands);
+      if (distance === TargetDistance.CloseTarget) found = true;
+      else if (distance === TargetDistance.FarTarget) localDistanceModifier *= 3;
+    } else if (!loadingUnit.getHasMoved() && hasTargetsFor !== undefined) {
+      found = hasTargetsFor(loadingUnit, canCapture, loadingIslandIdx, loadingIsland);
+    }
+    if (found) continue;
+
+    // Nothing for it to do where it is: find a shore we can both stand on.
+    let targetX = 0, targetY = 0, located = false;
+    let min = 1, max = transporterMovement;
+    let circleResult = CircleResult.Fail;
+    while (circleResult === CircleResult.Fail) {
+      circleResult = doExtendedCircleAction(
+        currentPos.x, currentPos.y, loadingUnit.getX(), loadingUnit.getY(), min, max, (x, y) => {
+          if (!ai.map.onMap(x, y)) return CircleResult.Stop;
+          if (ai.islandMaps[loadingIslandIdx].getIsland(x, y) !== loadingIsland) return CircleResult.Stop;
+          const fieldUnit = ai.map.getTerrain(x, y).getUnit();
+          if (ai.islandMaps[unitIslandIdx].getIsland(x, y) === unitIsland
+            && (fieldUnit === null || fieldUnit === unit)
+            && ai.isLoadingTerrain(unit, ai.map.getTerrain(x, y))) {
+            located = true; targetX = x; targetY = y;
+            return CircleResult.Success;
+          }
+          return CircleResult.Fail;
+        });
+      min += transporterMovement;
+      max += transporterMovement;
+    }
+    if (located && (virtualLoading
+      || !contains(targets, targetX, targetY, localDistanceModifier))) {
+      targets.push({ x: targetX, y: targetY, z: localDistanceModifier });
+      transportUnits.push(loadingUnit);
+      if (!all) break;
+    }
+  }
+  return transportUnits;
+}
+
 /** GlobalUtils::contains -- weight included, so one tile can appear twice. */
 function contains(targets: readonly MoveTargetField[], x: number, y: number, z: number): boolean {
   for (const target of targets) {

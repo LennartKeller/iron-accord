@@ -97,3 +97,43 @@ describe('NormalAi', () => {
     expect(builds).toBeGreaterThanOrEqual(Math.floor(env.game.day / 2));
   });
 });
+
+describe('NormalAi on water', () => {
+  const NAVAL = 'maps/2_player/Bean Island.map';
+
+  function navalEnvironment(seed = 1): GameEnvironment {
+    const map = loadIntoGameMap(readMap(fs.readFileSync(path.join(cwRoot(), NAVAL))), registry);
+    const env = new GameEnvironment(map, registry, { maxDays: 20, seed, rng });
+    env.reset(seed);
+    return env;
+  }
+
+  it('plays an island map without stalling', async () => {
+    const env = navalEnvironment(4);
+    const result = await playMatch(
+      env, [new NormalAi({ seed: 4 }), new RandomAgent(2)], { maxSteps: 8000 });
+    // The transport rungs must not deadlock: a ferry that keeps boarding and
+    // unloading the same unit would burn the step budget without ending a turn.
+    expect(result.reason).not.toBe('step-limit');
+  });
+
+  it('builds and moves on an island map', async () => {
+    const env = navalEnvironment(6);
+    let builds = 0;
+    await playMatch(env, [new NormalAi({ seed: 6 }), new RandomAgent(3)], {
+      maxSteps: 8000,
+      onStep(_step, action, player) { if (player === 0 && action.kind === 'build') builds++; },
+    });
+    expect(builds).toBeGreaterThan(0);
+  });
+
+  it('stays reproducible with the transport rungs in play', async () => {
+    const run = async () => {
+      const env = navalEnvironment(7);
+      const r = await playMatch(
+        env, [new NormalAi({ seed: 9 }), new RandomAgent(4)], { maxSteps: 8000 });
+      return `${r.winner}:${r.days}:${r.steps}`;
+    };
+    expect(await run()).toBe(await run());
+  });
+});
