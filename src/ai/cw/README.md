@@ -53,6 +53,7 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `ini.ts` | `CoreAI::randomizeIni` |
 | `islandmap.ts` | `ai/islandmap.cpp` |
 | `influencefrontmap.ts` | `ai/influencefrontmap.cpp`, minus the front lines |
+| `targetedpfs.ts` | `ai/targetedunitpathfindingsystem.cpp` + the A* in `coreengine/pathfindingsystem.cpp` |
 
 Regenerate the config after updating `ext/` with:
 
