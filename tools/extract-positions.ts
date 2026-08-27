@@ -382,6 +382,10 @@ for await (const line of lines) {
 
   const bucket = bucketFor(replay, map.width, map.height);
   const gameIndex = bucket.gameSeq++;
+  const bucketStart = bucket.count;
+  const offsetStart = bucket.offset;
+  const tallyStart = { ...labelTally };
+  const positionsStart = positions;
   let refused = 0;
 
   // One Belief per seat, kept across turns and refreshed at each turn start —
@@ -452,7 +456,24 @@ for await (const line of lines) {
     if (!applyAction(game, step.action)) refused++;
   }
 
-  if (refused > 0) diverged++;
+  if (refused > 0) {
+    diverged++;
+    // Discard the whole game. A refused action means the replay stopped
+    // matching the game that was recorded, so every position after it is from
+    // a game that never happened -- and the ones before it are labelled with
+    // that game's outcome, which this replay is no longer heading towards.
+    // Rewinding is only sound because a flush cannot have happened in between,
+    // which the shard-size check below guarantees by running after this.
+    bucket.count = bucketStart;
+    bucket.offset = offsetStart;
+    bucket.gameSeq--;
+    // The counters have to rewind too, or the summary reports positions that
+    // were written and then thrown away.
+    labelTally.win = tallyStart.win;
+    labelTally.draw = tallyStart.draw;
+    labelTally.loss = tallyStart.loss;
+    positions = positionsStart;
+  }
   if (bucket.count >= shardSize) flush(bucket);
 
   games++;
@@ -487,4 +508,6 @@ console.log(`labels: win ${(labelTally.win / total * 100).toFixed(1)}%  ` +
 console.log(`shards: ${manifest.length} across ${buckets.size} maps ` +
   `(${manifest.filter(s => s.split === 'train').length} train, ` +
   `${manifest.filter(s => s.split === 'validation').length} validation)`);
-if (diverged > 0) console.log(`WARNING: ${diverged} replays refused at least one action`);
+if (diverged > 0) {
+  console.log(`dropped ${diverged} replays (${(diverged / games * 100).toFixed(1)}%) that refused an action`);
+}
