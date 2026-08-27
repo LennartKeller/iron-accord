@@ -399,9 +399,17 @@ export class Unit {
   /**
    * game/unit.cpp: Unit::isAttackable — an enemy this unit can actually hurt.
    *
-   * `position` is the attacker's tile by default; when `isDefenderPos` is set it
-   * is the *defender's* tile instead and the attacker uses its own. ACTION_FIRE
-   * relies on that second form to ask "could the defender hit back?".
+   * `position` is the attacker's tile; when `isDefenderPos` is set it is the
+   * *defender's* tile instead and the attacker uses its own. ACTION_FIRE relies
+   * on that second form to ask "could the defender hit back?".
+   *
+   * Omitting `position` deliberately drops the range test rather than assuming
+   * the unit's current tile. The C++ defaults it to the off-map sentinel
+   * (-1, -1) and gates the range check on `onMap(unitPos)`, so with no position
+   * the question is "can this unit hurt that kind of unit at all", not "can it
+   * hit it from where it happens to be standing". The AI asks the first form
+   * while looking for a tile to move to, so conflating the two left it unable
+   * to see any target it could not already shoot.
    */
   isAttackable(
     defender: Unit | null,
@@ -418,15 +426,18 @@ export class Unit {
     // A hidden unit can only be hit by something that can see it.
     if (!ignoreOutOfVisionRange && defender.isStealthed(this.getOwner())) return false;
     if (defender.isStatusStealthed() && !this.canAttackStealthedUnit(defender)) return false;
-    if (isDefenderPos && position) {
-      return this.canReach(position, { x: this.x, y: this.y }, defender);
-    }
-    const from = position ?? { x: this.x, y: this.y };
+
+    // Matches the C++ exactly: no position means no range test.
+    const checkRange = position !== undefined && this.map.onMap(position.x, position.y);
+    const defenderPos = isDefenderPos && position ? position : { x: defender.x, y: defender.y };
+    const attackerPos = isDefenderPos || !position ? { x: this.x, y: this.y } : position;
+
     for (const [index, weaponID] of [[0, this.weapon1ID], [1, this.weapon2ID]] as Array<[number, string]>) {
       if (!weaponID) continue;
       if (index === 0 && !this.hasAmmo1()) continue;
       if (index === 1 && !this.hasAmmo2()) continue;
-      if (!this.canAttackWithWeapon(index, from.x, from.y, defender.x, defender.y)) continue;
+      if (checkRange && !this.canAttackWithWeapon(
+        index, attackerPos.x, attackerPos.y, defenderPos.x, defenderPos.y)) continue;
       const damage = this.map.registry[weaponID]?.getBaseDamage?.(defender);
       if (typeof damage === 'number' && damage > 0) return true;
     }
@@ -435,19 +446,6 @@ export class Unit {
 
   isAttackableFromPosition(defender: Unit | null, position: QPoint): boolean {
     return this.isAttackable(defender, false, position);
-  }
-
-  /** Shared weapon/range/damage test between the two isAttackable forms. */
-  private canReach(defenderPos: QPoint, attackerPos: QPoint, defender: Unit): boolean {
-    for (const [index, weaponID] of [[0, this.weapon1ID], [1, this.weapon2ID]] as Array<[number, string]>) {
-      if (!weaponID) continue;
-      if (index === 0 && !this.hasAmmo1()) continue;
-      if (index === 1 && !this.hasAmmo2()) continue;
-      if (!this.canAttackWithWeapon(index, attackerPos.x, attackerPos.y, defenderPos.x, defenderPos.y)) continue;
-      const damage = this.map.registry[weaponID]?.getBaseDamage?.(defender);
-      if (typeof damage === 'number' && damage > 0) return true;
-    }
-    return false;
   }
 
   /**

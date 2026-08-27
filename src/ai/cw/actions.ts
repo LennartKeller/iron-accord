@@ -1,0 +1,47 @@
+/**
+ * ai/coreai.cpp: the action ids CoreAI names.
+ *
+ * Every one is its own name as a string, so these are really just guards
+ * against typos -- and a typo here is silent, since an unknown action id simply
+ * never matches and the AI quietly stops doing that thing.
+ */
+export const CwAction = {
+  WAIT: 'ACTION_WAIT',
+  HOELLIUM_WAIT: 'ACTION_HOELLIUM_WAIT',
+  SUPPORTSINGLE: 'ACTION_SUPPORTSINGLE',
+  SUPPORTSINGLE_REPAIR: 'ACTION_SUPPORTSINGLE_REPAIR',
+  SUPPORTSINGLE_FREEREPAIR: 'ACTION_SUPPORTSINGLE_FREEREPAIR',
+  SUPPORTSINGLE_SUPPLY: 'ACTION_SUPPORTSINGLE_SUPPLY',
+  SUPPORTALL: 'ACTION_SUPPORTALL',
+  SUPPORTALL_RATION: 'ACTION_SUPPORTALL_RATION',
+  SUPPORTALL_RATION_MONEY: 'ACTION_SUPPORTALL_RATION_MONEY',
+  BUILD: 'ACTION_BUILD',
+  BUILD_UNITS: 'ACTION_BUILD_UNITS',
+  UNSTEALTH: 'ACTION_UNSTEALTH',
+  STEALTH: 'ACTION_STEALTH',
+  CAPTURE: 'ACTION_CAPTURE',
+  MISSILE: 'ACTION_MISSILE',
+  PLACE: 'ACTION_PLACE',
+  FIRE: 'ACTION_FIRE',
+  JOIN: 'ACTION_JOIN',
+  UNLOAD: 'ACTION_UNLOAD',
+  LOAD: 'ACTION_LOAD',
+  NEXT_PLAYER: 'ACTION_NEXT_PLAYER',
+  EXPLODE: 'ACTION_EXPLODE',
+  FLARE: 'ACTION_FLARE',
+  TRAP: 'ACTION_TRAP',
+  BLACKHOLEFACTORY_DOOR1: 'ACTION_BLACKHOLEFACTORY_DOOR1',
+  BLACKHOLEFACTORY_DOOR2: 'ACTION_BLACKHOLEFACTORY_DOOR2',
+  BLACKHOLEFACTORY_DOOR3: 'ACTION_BLACKHOLEFACTORY_DOOR3',
+  NEST_FACTORY_DOOR: 'ACTION_NEST_FACTORY_DOOR',
+  PRODUCE_OOZIUM_FREE: 'ACTION_PRODUCE_OOZIUM_FREE',
+} as const;
+
+/** ai/coreai.cpp: CoreAI::isRefuelUnit -- can this unit resupply others? */
+export function isRefuelUnit(actions: readonly string[]): boolean {
+  return actions.includes(CwAction.SUPPORTALL_RATION)
+    || actions.includes(CwAction.SUPPORTALL_RATION_MONEY)
+    || actions.includes(CwAction.SUPPORTSINGLE_FREEREPAIR)
+    || actions.includes(CwAction.SUPPORTSINGLE_REPAIR)
+    || actions.includes(CwAction.SUPPORTSINGLE_SUPPLY);
+}

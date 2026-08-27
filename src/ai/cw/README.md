@@ -56,6 +56,8 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `targetedpfs.ts` | `ai/targetedunitpathfindingsystem.cpp` + the A* in `coreengine/pathfindingsystem.cpp` |
 | `damage.ts` | `CoreAI::getBaseDamage` / `calcVirtuelUnitDamage` / `calcBuildingDamage` / `calcFundsDamage` |
 | `targets.ts` | `CoreAI::getAttackTargets` / `getBestTarget` / `isAttackOnTerrainAllowed` |
+| `actions.ts` | the `ACTION_*` ids `CoreAI` names |
+| `coreai.ts` | `ai/coreai.cpp` -- island maps, predicates, the `append*Targets` family |
 
 Regenerate the config after updating `ext/` with:
 
@@ -112,3 +114,14 @@ arguments, so the "counter" it reports is really the attack repeated.
 Transcribed rather than corrected: the AI's tunables were fitted against these
 numbers, and quietly making them right would change every decision that reads
 them. Worth revisiting only as a deliberate, measured experiment.
+
+`CoreAI::appendSupplyTargets` gates its low-ammo test on `hasAmmo1()`, which is
+false at exactly zero, so the unit that most needs resupply is the one it skips.
+Transcribed rather than corrected. `needsRefuel` has no such gate, so a dry unit
+still goes looking for a depot under its own steam -- only the supply truck's
+side of the arrangement is blind.
+
+`CoreAI::getIsland`'s fallback path, taken when no island map for the movement
+type exists yet, returns the new map's *index* rather than the island at the
+unit's position. Callers compare it against other `getIsland` results, so it is
+not inert; reproduced anyway, since the tuning was fitted around it.
