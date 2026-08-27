@@ -17,7 +17,10 @@ export class InfluenceInfo {
   /** Player ids tied for the most influence here; empty when the tile is dead. */
   owners: number[] = [];
 
-  constructor(private readonly map: GameMap) {
+  private readonly map: GameMap;
+
+  constructor(map: GameMap) {
+    this.map = map;
     this.playerValues = new Array(map.getPlayerCount()).fill(0);
   }
 
@@ -104,7 +107,12 @@ export class InfluenceFrontMap {
   /** Cache of unit id -> index into `islands`, as the C++ builds per call. */
   private readonly unitIdToIsland = new Map<string, number>();
 
-  constructor(private readonly map: GameMap, private readonly islands: IslandMap[]) {
+  private readonly map: GameMap;
+  private readonly islands: IslandMap[];
+
+  constructor(map: GameMap, islands: IslandMap[]) {
+    this.map = map;
+    this.islands = islands;
     this.width = map.getMapWidth();
     this.height = map.getMapHeight();
     this.info = new Array(this.width * this.height);

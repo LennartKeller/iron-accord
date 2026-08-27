@@ -4,11 +4,17 @@ import { CwAction } from './actions.ts';
 import type { CoreAI } from './coreai.ts';
 import type { MoveTargetField } from './targets.ts';
 
+// Plain objects rather than enums: the self-play workers run under node's
+// strip-only TypeScript, which cannot compile enums, and this file is on their
+// import path.
+
 /** ai/coreai.h: CoreAI::CircleReturns. */
-export const enum CircleResult { Stop, Fail, Success }
+export const CircleResult = { Stop: 0, Fail: 1, Success: 2 } as const;
+export type CircleResult = typeof CircleResult[keyof typeof CircleResult];
 
 /** ai/coreai.h: CoreAI::TargetDistance, ordered as the C++ enum is. */
-export const enum TargetDistance { CloseTarget, FarTarget, NoTarget }
+export const TargetDistance = { CloseTarget: 0, FarTarget: 1, NoTarget: 2 } as const;
+export type TargetDistance = typeof TargetDistance[keyof typeof TargetDistance];
 
 /** Tiles adjacent to a point -- where cargo can step off a transport. */
 const UNLOAD_AREA = getCircle(1, 1);
@@ -28,7 +34,7 @@ export function doExtendedCircleAction(
   min: number, max: number,
   functor: (x: number, y: number) => CircleResult,
 ): CircleResult {
-  let ret = CircleResult.Fail;
+  let ret: CircleResult = CircleResult.Fail;
   const states: CircleResult[] = [
     CircleResult.Success, CircleResult.Success, CircleResult.Success, CircleResult.Success,
   ];
@@ -85,7 +91,7 @@ export function checkIslandForUnloading(
   targets: MoveTargetField[], distanceModifier = 1,
 ): void {
   let min = 0, max = SEARCH_RADIUS;
-  let result = CircleResult.Fail;
+  let result: CircleResult = CircleResult.Fail;
   // Upstream records the island map's *index* here while the callers test
   // `contains(checkedIslands, targetIsland)` against island ids. Transcribed:
   // the mismatch changes which islands get skipped, so it is not inert.
@@ -350,7 +356,7 @@ export function hasCaptureTarget(
   const movementPoints = loadingUnit.getMovementpoints({ x: unitX, y: unitY });
   const minMovementDistance = movementPoints * ai.config.minSameIslandDistance;
 
-  let found = TargetDistance.NoTarget;
+  let found: TargetDistance = TargetDistance.NoTarget;
   for (const building of enemyBuildings) {
     const x = building.getX(), y = building.getY();
     const distance = Math.abs(x - unitX) + Math.abs(y - unitY);
@@ -476,7 +482,7 @@ export function appendLoadingTargets(
     // Nothing for it to do where it is: find a shore we can both stand on.
     let targetX = 0, targetY = 0, located = false;
     let min = 1, max = transporterMovement;
-    let circleResult = CircleResult.Fail;
+    let circleResult: CircleResult = CircleResult.Fail;
     while (circleResult === CircleResult.Fail) {
       circleResult = doExtendedCircleAction(
         currentPos.x, currentPos.y, loadingUnit.getX(), loadingUnit.getY(), min, max, (x, y) => {

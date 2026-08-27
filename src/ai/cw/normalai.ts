@@ -29,16 +29,20 @@ import {
  * has not passed it, so a turn walks steadily downward rather than reconsidering
  * everything each time.
  */
-const enum AISteps {
-  moveUnits = 0,
-  moveToTargets,
-  moveIndirectsToTargets,
-  loadUnits,
-  moveTransporters,
-  moveSupportUnits,
-  moveAway,
-  buildUnits,
-}
+const AISteps = {
+  moveUnits: 0,
+  moveToTargets: 1,
+  moveIndirectsToTargets: 2,
+  loadUnits: 3,
+  moveTransporters: 4,
+  moveSupportUnits: 5,
+  moveAway: 6,
+  buildUnits: 7,
+} as const;
+// A plain object rather than an enum: the self-play workers run under node's
+// strip-only TypeScript, which cannot compile enums, and this file is on their
+// import path.
+type AISteps = typeof AISteps[keyof typeof AISteps];
 
 /**
  * ai/coreai.js: COREAI.highPrioBuildings.
@@ -80,7 +84,7 @@ export class NormalAi implements Agent {
   private influence: InfluenceFrontMap | null = null;
   private ownUnits: MoveUnitData[] = [];
   private enemyUnits: MoveUnitData[] = [];
-  private aiStep = AISteps.moveUnits;
+  private aiStep: number = AISteps.moveUnits;
   private aiFunctionStep = 0;
   private secondMoveRound = false;
   private rngState: number;
@@ -474,7 +478,7 @@ export class NormalAi implements Agent {
    * first, so the filter has no effect and every unit's neighbours end up in
    * the list. Transcribed as the single unfiltered pass it amounts to.
    */
-  private moveSupport(game: Game, step: AISteps, useTransporters: boolean): ActionDescriptor | null {
+  private moveSupport(game: Game, step: number, useTransporters: boolean): ActionDescriptor | null {
     this.aiStep = step;
     const ring = [[0, -1], [1, 0], [0, 1], [-1, 0]] as Array<[number, number]>;
     const unitTargets: MoveTargetField[] = [];

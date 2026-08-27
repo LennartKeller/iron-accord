@@ -32,7 +32,9 @@ export class DamagePredictor {
   /** Keyed weaponID + defender unit id, as the C++ keys m_baseDamageTable. */
   private readonly baseDamageTable = new Map<string, number>();
 
-  constructor(private readonly map: GameMap) {}
+  private readonly map: GameMap;
+
+  constructor(map: GameMap) { this.map = map; }
 
   /**
    * resource_management/weaponmanager.cpp: WeaponManager::getBaseDamage -- what

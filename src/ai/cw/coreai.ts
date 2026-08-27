@@ -37,11 +37,14 @@ export class CoreAI {
   /** Whether neutral structures may be shot at; upstream reads it from rules. */
   enableNeutralTerrainAttack = false;
 
-  constructor(
-    readonly game: Game,
-    readonly player: Player,
-    readonly config: NormalAiConfig,
-  ) {
+  readonly game: Game;
+  readonly player: Player;
+  readonly config: NormalAiConfig;
+
+  constructor(game: Game, player: Player, config: NormalAiConfig) {
+    this.game = game;
+    this.player = player;
+    this.config = config;
     this.map = game.map;
     this.predictor = new DamagePredictor(this.map);
     this.moveCostMap = new Int32Array(this.map.getMapWidth() * this.map.getMapHeight());

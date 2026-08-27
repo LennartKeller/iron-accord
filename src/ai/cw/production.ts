@@ -48,7 +48,9 @@ export class ProductionSystem {
   private forcedProduction: ForcedProduction[] = [];
   private initialised = false;
 
-  constructor(private readonly random: () => number) {}
+  private readonly random: () => number;
+
+  constructor(random: () => number) { this.random = random; }
 
   /**
    * ai/coreai.js: COREAI.initializeSimpleProductionSystem, reduced to the no-CO

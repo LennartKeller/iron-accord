@@ -61,12 +61,17 @@ export class TargetedUnitPathFindingSystem {
   private finishNodes: Array<{ x: number; y: number; movementCost: number; multiplier: number }> = [];
   private finishInfo = { bestCost: -1, target: -1, remainingCost: -1 };
 
+  private readonly map: GameMap;
+  private readonly unit: Unit;
+
   constructor(
-    private readonly map: GameMap,
-    private readonly unit: Unit,
+    map: GameMap,
+    unit: Unit,
     targets: WeightedTarget[],
     options: TargetedPfsOptions = {},
   ) {
+    this.map = map;
+    this.unit = unit;
     this.width = map.getMapWidth();
     this.height = map.getMapHeight();
     this.moveCostMap = options.moveCostMap ?? null;
