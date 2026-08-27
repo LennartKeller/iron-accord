@@ -11,7 +11,7 @@ import { Game, fogViewerIndex, nextObserverSeat, type ActionStep } from '../src/
 import { describeVictoryRules, type VictoryRuleInfo } from '../src/game/victory.ts';
 import { threatenedTiles } from '../src/game/threat.ts';
 import {
-  GameEnvironment, HeuristicAgent, PlannerAgent, applyAction, enumerateActions,
+  GameEnvironment, HeuristicAgent, NormalAi, PlannerAgent, applyAction, enumerateActions,
   type Agent,
 } from '../src/ai/index.ts';
 import { ValueNetAgent } from '../src/ai/valuenet.web.ts';
@@ -64,12 +64,19 @@ let game: Game | null = null;
 let scene: Scene | null = null;
 let env: GameEnvironment | null = null;
 /**
- * The opponents on offer. The planner searches whole turns and reasons from
- * what its side can actually see, so it is the one to play under fog; the
- * heuristic is faster and remains the default.
+ * The opponents on offer.
+ *
+ * `commanderwars` is the strongest of them and also the cheapest: it is
+ * Commander Wars' own NormalAi, ported, and it beats the heuristic 0.906 and
+ * the value-net planner's own baseline while thinking for milliseconds rather
+ * than seconds. The planner searches whole turns and reasons from what its side
+ * can actually see; the heuristic is the fastest and stays the default so a
+ * first tap is instant.
  */
 const AGENTS: Record<string, () => Agent> = {
   heuristic: () => new HeuristicAgent(),
+  // Seeded per battle rather than fixed, so repeat games are not identical.
+  commanderwars: () => new NormalAi({ seed: (Math.random() * 0x7fffffff) >>> 0 || 1 }),
   // A visible turn should not stall on a phone, so the search is kept short.
   planner: () => new PlannerAgent({ timeBudgetMs: 250 }),
   // Same search, learned position evaluation. The model loads on first use.
