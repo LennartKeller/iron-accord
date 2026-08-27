@@ -58,6 +58,7 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `targets.ts` | `CoreAI::getAttackTargets` / `getBestTarget` / `isAttackOnTerrainAllowed` |
 | `actions.ts` | the `ACTION_*` ids `CoreAI` names |
 | `coreai.ts` | `ai/coreai.cpp` -- island maps, predicates, the `append*Targets` family |
+| `transport.ts` | `CoreAI::doExtendedCircleAction` and the loading/unloading targets |
 
 Regenerate the config after updating `ext/` with:
 
@@ -125,3 +126,14 @@ side of the arrangement is blind.
 type exists yet, returns the new map's *index* rather than the island at the
 unit's position. Callers compare it against other `getIsland` results, so it is
 not inert; reproduced anyway, since the tuning was fitted around it.
+
+The transport code carries three more index/id confusions from upstream, all
+transcribed because they change which islands get skipped rather than being
+inert. `checkIslandForUnloading` records the island map's *index* in the
+checked-islands list while its callers test that list against island *ids*.
+`appendNearestUnloadTargets` keys its checked set on the transport's movement
+type rather than the passenger's, so two different passengers share one list;
+and in its capture loop it indexes the per-passenger island array by the
+*capture* index, so a transport carrying a non-capturing unit first reads the
+wrong island map. Only the last is guarded, and only against running off the end
+of the array.

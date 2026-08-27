@@ -780,6 +780,15 @@ export class Unit {
   /** game/unit.cpp: Unit::hasAction */
   hasAction(action: string): boolean { return this.getActionList().includes(action); }
 
+  /**
+   * game/unit.cpp: Unit::canCapture.
+   *
+   * Reads the base action list, which here is the same list getActionList
+   * returns -- the C++ pair differ only by CO action modifiers, and there are
+   * no COs.
+   */
+  canCapture(): boolean { return this.getActionList().includes('ACTION_CAPTURE'); }
+
   /** The carried units themselves, where getLoadedUnit(i) fetches one. */
   getLoadedUnits(): Unit[] { return this.loaded; }
 
