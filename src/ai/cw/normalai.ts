@@ -5,7 +5,7 @@ import type { Game } from '../../game/game.ts';
 import type { BuildingHost, Player, Unit } from '../../host/index.ts';
 import { computeMovementRange, key } from '../../game/pathfinding.ts';
 import { CoreAI } from './coreai.ts';
-import { CwAction } from './actions.ts';
+import { CwAction, isRefuelUnit } from './actions.ts';
 import { NORMAL_AI_DEFAULTS, type NormalAiConfig } from './config.ts';
 import { InfluenceFrontMap } from './influencefrontmap.ts';
 import { TargetedUnitPathFindingSystem } from './targetedpfs.ts';
@@ -259,6 +259,10 @@ export class NormalAi implements Agent {
       if (captured !== null) return captured;
       // Indirects first, then directs -- artillery that has to stand still
       // wants the pick of the targets before the tanks commit.
+      const joined = this.joinCaptureBuildings(game);
+      if (joined !== null) return joined;
+      const supported = this.moveSupport(game, AISteps.moveUnits, false);
+      if (supported !== null) return supported;
       const indirect = this.fireWithUnits(
         game, 1, 2, Number.MAX_SAFE_INTEGER, buildings, enemyBuildings);
       if (indirect !== null) return indirect;
@@ -266,6 +270,10 @@ export class NormalAi implements Agent {
       if (direct !== null) return direct;
       const repaired = this.repairUnits(game, buildings, enemyBuildings);
       if (repaired !== null) return repaired;
+    }
+    if (this.aiStep <= AISteps.moveToTargets) {
+      const refilled = this.refillUnits(game, buildings, enemyBuildings);
+      if (refilled !== null) return refilled;
     }
     if (this.aiStep <= AISteps.moveToTargets) {
       const moved = this.moveUnits(
@@ -276,6 +284,10 @@ export class NormalAi implements Agent {
       const moved = this.moveUnits(
         game, player, buildings, enemyBuildings, enemyUnits, 2, Number.MAX_SAFE_INTEGER);
       if (moved !== null) return moved;
+    }
+    if (this.aiStep <= AISteps.moveSupportUnits) {
+      const supported = this.moveSupport(game, AISteps.moveSupportUnits, true);
+      if (supported !== null) return supported;
     }
     if (this.aiStep <= AISteps.loadUnits) {
       const loaded = this.loadUnits(game, buildings, enemyBuildings);
@@ -294,6 +306,206 @@ export class NormalAi implements Agent {
       if (built !== null) return built;
     }
     this.aiStep = AISteps.buildUnits + 1;
+    return null;
+  }
+
+  /**
+   * ai/normalai.cpp: NormalAi::joinCaptureBuildings -- merge a spare capturer
+   * into one that is already part-way through taking a building.
+   *
+   * Two half-strength soldiers capture at half speed each; one full-strength
+   * soldier captures at full speed, so joining is strictly better whenever the
+   * receiver is mid-capture.
+   */
+  private joinCaptureBuildings(game: Game): ActionDescriptor | null {
+    for (const data of this.ownUnits) {
+      if (data.nextAiStep > this.aiFunctionStep) continue;
+      const unit = data.unit;
+      data.nextAiStep++;
+      if (unit.getHasMoved() || data.range === null) continue;
+      if (!data.actions.includes(CwAction.CAPTURE)) continue;
+      if (!data.actions.includes(CwAction.JOIN)) continue;
+
+      for (const tile of data.range.tiles.values()) {
+        if (tile.cost > data.movementPoints) continue;
+        const other = game.map.getTerrain(tile.x, tile.y).getUnit();
+        if (other === null || other === unit) continue;
+        if (other.getCapturePoints() <= 0) continue;
+        if (!this.canPerform(game, unit, tile, CwAction.JOIN)) continue;
+        return this.unitAction(unit, CwAction.JOIN, tile);
+      }
+    }
+    this.aiFunctionStep++;
+    return null;
+  }
+
+  /**
+   * ai/normalai.cpp: NormalAi::refillUnits -- park a supply unit where it can
+   * resupply the most neighbours at once.
+   */
+  private refillUnits(
+    game: Game, buildings: BuildingHost[], enemyBuildings: BuildingHost[],
+  ): ActionDescriptor | null {
+    this.aiStep = AISteps.moveToTargets;
+    const core = this.core!;
+    for (const data of this.ownUnits) {
+      if (data.nextAiStep > this.aiFunctionStep) continue;
+      const unit = data.unit;
+      if (unit.getLoadedUnitCount() !== 0 || data.range === null) continue;
+      if (!this.isUsingUnit(game, unit)) continue;
+      if (!isRefuelUnit(data.actions)) continue;
+
+      // The action decides how many neighbours one stop can serve: the
+      // ration-for-everyone forms want a crowd, the single-target ones want one.
+      const supportAll = data.actions.includes(CwAction.SUPPORTALL_RATION)
+        || data.actions.includes(CwAction.SUPPORTALL_RATION_MONEY);
+      const actionId = supportAll
+        ? (data.actions.includes(CwAction.SUPPORTALL_RATION)
+          ? CwAction.SUPPORTALL_RATION : CwAction.SUPPORTALL_RATION_MONEY)
+        : [CwAction.SUPPORTSINGLE_REPAIR, CwAction.SUPPORTSINGLE_FREEREPAIR,
+           CwAction.SUPPORTSINGLE_SUPPLY].find(id => data.actions.includes(id));
+      if (actionId === undefined) continue;
+
+      const best = this.bestRefillTarget(game, data, supportAll ? 4 : 1);
+      if (best !== null) {
+        if (!this.canPerform(game, unit, best.moveTarget, actionId)) continue;
+        data.nextAiStep++;
+        return supportAll
+          ? this.unitAction(unit, actionId, best.moveTarget)
+          : {
+            kind: 'unit', uid: unit.uid, actionId,
+            to: { x: best.moveTarget.x, y: best.moveTarget.y },
+            steps: [{ x: best.refillTarget.x, y: best.refillTarget.y }],
+          };
+      }
+
+      // Nobody in reach: walk toward whoever needs supplying.
+      const targets: MoveTargetField[] = [];
+      this.appendRefillTargets(core, data, targets);
+      if (targets.length === 0) continue;
+      data.nextAiStep++;
+      const move = this.moveUnit(game, data, targets, [], buildings, enemyBuildings, true);
+      if (move !== null) return move;
+    }
+    this.aiFunctionStep++;
+    return null;
+  }
+
+  /**
+   * ai/normalai.cpp: NormalAi::getBestRefillTarget -- the reachable tile with
+   * the most needy neighbours, stopping early once `maxRefillCount` is met.
+   */
+  private bestRefillTarget(
+    game: Game, data: MoveUnitData, maxRefillCount: number,
+  ): { moveTarget: Point; refillTarget: Point } | null {
+    const range = data.range;
+    if (range === null) return null;
+    const ring = [[0, -1], [1, 0], [0, 1], [-1, 0]] as Array<[number, number]>;
+    let found = false;
+    let moveTarget: Point | null = null;
+    let refillTarget: Point | null = null;
+    let highestCount = 0;
+
+    for (const tile of range.tiles.values()) {
+      if (tile.cost > data.movementPoints + 1) continue;
+      if (game.map.getTerrain(tile.x, tile.y).getUnit() !== null) continue;
+      let count = 0;
+      let lastNeedy: Point | null = null;
+      for (const [dx, dy] of ring) {
+        const x = tile.x + dx, y = tile.y + dy;
+        if (!game.map.onMap(x, y)) continue;
+        const supply = game.map.getTerrain(x, y).getUnit();
+        if (supply === null || supply.getOwner() !== this.core!.player) continue;
+        if (!this.core!.needsRefuel(supply)) continue;
+        count++;
+        found = true;
+        lastNeedy = { x, y };
+        if (count === maxRefillCount) break;
+      }
+      if (count === maxRefillCount && lastNeedy !== null) {
+        return { moveTarget: { x: tile.x, y: tile.y }, refillTarget: lastNeedy };
+      }
+      if (count > highestCount) {
+        highestCount = count;
+        moveTarget = { x: tile.x, y: tile.y };
+        refillTarget = lastNeedy;
+      }
+    }
+    if (!found || moveTarget === null) return null;
+    return { moveTarget, refillTarget: refillTarget ?? moveTarget };
+  }
+
+  /** ai/normalai.cpp: NormalAi::appendRefillTargets -- tiles beside needy units. */
+  private appendRefillTargets(core: CoreAI, data: MoveUnitData, targets: MoveTargetField[]): void {
+    if (!isRefuelUnit(data.actions)) return;
+    const unit = data.unit;
+    const islandIdx = core.getIslandIndex(unit);
+    const islands = core.islandMaps[islandIdx];
+    const ring = [[0, -1], [1, 0], [0, 1], [-1, 0]] as Array<[number, number]>;
+    for (const other of this.ownUnits) {
+      if (!core.needsRefuel(other.unit)) continue;
+      for (const [dx, dy] of ring) {
+        const x = other.unit.getX() + dx, y = other.unit.getY() + dy;
+        if (!core.map.onMap(x, y)) continue;
+        if (!islands.sameIsland(unit.getX(), unit.getY(), x, y)) continue;
+        if (targets.some(t => t.x === x && t.y === y && t.z === 1)) continue;
+        targets.push({ x, y, z: 1 });
+      }
+    }
+  }
+
+  /**
+   * ai/coreai_predefinedai.cpp: CoreAI::moveSupport -- move a repair or supply
+   * unit next to somebody who needs it.
+   *
+   * Upstream builds its candidate list twice, once filtered to damaged and
+   * affordable units and once unfiltered; the second pass dedupes against the
+   * first, so the filter has no effect and every unit's neighbours end up in
+   * the list. Transcribed as the single unfiltered pass it amounts to.
+   */
+  private moveSupport(game: Game, step: AISteps, useTransporters: boolean): ActionDescriptor | null {
+    this.aiStep = step;
+    const ring = [[0, -1], [1, 0], [0, 1], [-1, 0]] as Array<[number, number]>;
+    const unitTargets: MoveTargetField[] = [];
+    const unitPos: Point[] = [];
+    for (const data of this.ownUnits) {
+      const unit = data.unit;
+      for (const [dx, dy] of ring) {
+        const x = unit.getX() + dx, y = unit.getY() + dy;
+        if (!game.map.onMap(x, y)) continue;
+        if (game.map.getTerrain(x, y).getUnit() !== null) continue;
+        if (unitTargets.some(t => t.x === x && t.y === y && t.z === 1)) continue;
+        unitTargets.push({ x, y, z: 1 });
+        unitPos.push({ x: unit.getX(), y: unit.getY() });
+      }
+    }
+
+    for (const data of this.ownUnits) {
+      const unit = data.unit;
+      if (unit.getHasMoved() || data.range === null) continue;
+      if (unit.getLoadedUnitCount() !== 0) continue;
+      if (unit.getLoadingPlace() !== 0 && !useTransporters) continue;
+
+      for (const action of data.actions) {
+        const single = action.startsWith(CwAction.SUPPORTSINGLE);
+        if (!single && !action.startsWith(CwAction.SUPPORTALL)) continue;
+        for (const tile of data.range.tiles.values()) {
+          if (tile.cost > data.movementPoints) continue;
+          const index = unitTargets.findIndex(t => t.x === tile.x && t.y === tile.y);
+          if (index < 0) continue;
+          const beneficiary = unitPos[index];
+          if (beneficiary.x === unit.getX() && beneficiary.y === unit.getY()) continue;
+          if (!this.canPerform(game, unit, tile, action)) continue;
+          return single
+            ? {
+              kind: 'unit', uid: unit.uid, actionId: action,
+              to: { x: tile.x, y: tile.y },
+              steps: [{ x: beneficiary.x, y: beneficiary.y }],
+            }
+            : this.unitAction(unit, action, tile);
+        }
+      }
+    }
     return null;
   }
 

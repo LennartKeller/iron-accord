@@ -64,9 +64,11 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `movement.ts` | `getClosestReachableMovePath` / `getMoveTargetField` / `moveToSafety` |
 | `normalai.ts` | `NormalAi`'s step ladder, as an `Agent` |
 
-The ladder now runs capture, fire, repair, move, load, ferry, clear-production
-and build. Only `refillUnits`, `moveSupport` and `joinCaptureBuildings` are
-still missing from `performActionSteps`.
+Every rung of `performActionSteps` is ported except the CO and Black Hole
+branches that do not apply here: `buildCOUnit`, `moveFlares`, `moveOoziums` and
+`moveBlackBombs`. What runs is capture, join-capture, support, fire (indirect
+then direct), repair, refill, move, move-indirects, support again, load, ferry,
+clear-production and build.
 
 Regenerate the config after updating `ext/` with:
 
