@@ -50,7 +50,19 @@ export class BuildingHost {
   getVariables() { return this.variables; }
   unloadSprites(): void { this.sprites.length = 0; }
   getImageSize(): number { return this.map.getImageSize(); }
-  getIsAttackable(): boolean { return this.hp > 0; }
+  /**
+   * game/building.cpp: Building::getIsAttackable(x, y) -- whether one specific
+   * tile of this building can be shot at.
+   *
+   * The coordinates matter: cannon-type buildings span several tiles and only
+   * expose one of them as a target, which is exactly what their scripts encode.
+   * This used to ignore its arguments and answer `hp > 0`, which no caller
+   * exercised until the AI started looking for firing positions.
+   */
+  getIsAttackable(x: number, y: number): boolean {
+    const result = this.map.registry[this.buildingID]?.getIsAttackable?.(this, x, y, this.map);
+    return result === true;
+  }
   getBaseTerrain(): string[] {
     const list = this.map.registry[this.buildingID]?.getBaseTerrain?.(this, this.map);
     return Array.isArray(list) ? [...list] : [];

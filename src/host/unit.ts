@@ -805,6 +805,14 @@ export class Unit {
   }
 
   /**
+   * game/unit.cpp: Unit::isEnvironmentAttackable -- can any of this unit's
+   * weapons hurt that structure at all?
+   */
+  isEnvironmentAttackable(terrainID: string): boolean {
+    return this.getEnvironmentDamage(terrainID) > 0;
+  }
+
+  /**
    * game/unit.cpp: Unit::getEnvironmentDamage -- damage this unit deals to a
    * destructible terrain, which is how the AI decides to shoot a forest or a pipe.
    */
