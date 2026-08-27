@@ -54,6 +54,7 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `islandmap.ts` | `ai/islandmap.cpp` |
 | `influencefrontmap.ts` | `ai/influencefrontmap.cpp`, minus the front lines |
 | `targetedpfs.ts` | `ai/targetedunitpathfindingsystem.cpp` + the A* in `coreengine/pathfindingsystem.cpp` |
+| `damage.ts` | `CoreAI::getBaseDamage` / `calcVirtuelUnitDamage` / `calcBuildingDamage` / `calcFundsDamage` |
 
 Regenerate the config after updating `ext/` with:
 
@@ -72,6 +73,14 @@ Qt writes a user settings group named `General` as `[%General]` on disk, because
 QSettings reserves the plain `General` section for ungrouped keys. Reading the
 literal name finds nothing, which would have silently dropped 15 of the 126
 knobs -- `DirectIndirectRatio` and `MinMovementDamage` among them.
+
+## The battle formula is not ported
+
+`CoreAI::calcVirtuelUnitDamage` forwards to the `ACTION_FIRE` script's
+`calcBattleDamage3`, and that script is one we already run unmodified. So
+`damage.ts` calls it directly: the number the AI scores a move on is produced by
+the same function that will resolve the attack, and the two cannot drift apart.
+Only the caching and the funds scoring around it are ported.
 
 ## Landmines carried over deliberately
 
@@ -95,3 +104,10 @@ the `frontMovetype` / `frontOwners` fields. Nothing reads any of it back --
 `NormalAi` touches only `getOwnInfluence()` and `getEnemyInfluence()`, and the
 rest exists to colour a debug overlay. Around 250 lines of recursive grouping,
 skipped as pure risk with no gameplay effect.
+
+`CoreAI::calcUnitDamageFast` computes its counter-damage half by calling
+`getBaseDamage(pAttacker, pDefender)` a second time instead of swapping the
+arguments, so the "counter" it reports is really the attack repeated.
+Transcribed rather than corrected: the AI's tunables were fitted against these
+numbers, and quietly making them right would change every decision that reads
+them. Worth revisiting only as a deliberate, measured experiment.

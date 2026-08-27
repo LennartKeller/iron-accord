@@ -44,6 +44,10 @@ export const GameEnums: Record<string, number> = {
   // Unit families, used by BUILDING.getRepairTypes and several script rules.
   // Missing values made every type comparison silently fail to match.
   // NOTE: a bitmask, not an ordinal sequence (game/GameEnums.h:178-185).
+  BuildingTarget_All: 0,
+  BuildingTarget_Own: 1,
+  BuildingTarget_Enemy: 2,
+
   UnitType_Ground: 1,
   UnitType_Hovercraft: 2,
   UnitType_Infantry: 4,
