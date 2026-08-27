@@ -53,8 +53,35 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number]> = [
  * finish its move on an occupied tile, while an enemy unit blocks the tile
  * outright (unitpathfindingsystem.cpp returns cost -1 for it).
  */
-export function computeMovementRange(map: GameMap, unit: Unit): MovementRange {
-  const budget = unit.getMovementpoints();
+/**
+ * The two knobs on game/unitpathfindingsystem.h the AI turns.
+ *
+ * Both default to what a real move does, so an omitted options object is the
+ * plain "where can this unit go this turn" question every existing caller asks.
+ */
+export interface MovementOptions {
+  /**
+   * Overrides the unit's own movement points.
+   *
+   * The AI explores several turns of travel at once to judge how far away a
+   * target is, which is UnitPathFindingSystem::setMovepoints with a multiplier.
+   */
+  budget?: number;
+  /**
+   * game/unitpathfindingsystem.h: CollisionIgnore. Note the C++ sense -- `off`
+   * means ignoring is off, so enemies block, which is the normal rule.
+   *
+   * `onlyNotMoved` blocks only on enemies that have yet to move: one that has
+   * already acted is not going to be standing there when we arrive.
+   */
+  ignoreEnemies?: 'off' | 'onlyNotMoved' | 'all';
+}
+
+export function computeMovementRange(
+  map: GameMap, unit: Unit, options: MovementOptions = {},
+): MovementRange {
+  const budget = options.budget ?? unit.getMovementpoints();
+  const ignoreEnemies = options.ignoreEnemies ?? 'off';
   const width = map.width;
 
   // Flat arrays during the search; the string-keyed Maps are built once at the
@@ -95,7 +122,9 @@ export function computeMovementRange(map: GameMap, unit: Unit): MovementRange {
         // overlay silently reveals exactly where every hidden unit is standing.
         const blocks = unit.getOwner().isEnemyUnit(occupant)
           && !occupant.isStealthed(unit.getOwner())
-          && !unit.getIgnoreUnitCollision();
+          && !unit.getIgnoreUnitCollision()
+          && (ignoreEnemies === 'off'
+            || (ignoreEnemies === 'onlyNotMoved' && !occupant.getHasMoved()));
         if (blocks) continue;
       }
 

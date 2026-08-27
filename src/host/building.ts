@@ -189,6 +189,23 @@ export class BuildingHost {
   // and so absent until the CoreAI port. Transcriptions -- see src/ai/cw/README.md.
 
   /**
+   * game/building.cpp: Building::getIncome.
+   *
+   * The base is truncated before the modifier is applied and again after, which
+   * is why this is not simply baseIncome * modifier. Every shipped building
+   * returns a whole number, so the two agree today; the C++ order is kept so
+   * they still agree if one ever does not.
+   *
+   * CO income bonuses and enemy income reduction are both zero here.
+   */
+  getIncome(): number {
+    const owner = this.getOwner();
+    const base = Math.trunc(this.getBaseIncome());
+    if (owner === null) return Math.max(0, base);
+    return Math.max(0, Math.trunc(base * owner.getFundsModifier()));
+  }
+
+  /**
    * game/building.cpp: Building::getActionList.
    *
    * The C++ appends the owning CO's action modifiers; with no COs that reduces

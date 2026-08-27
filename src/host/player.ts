@@ -184,6 +184,41 @@ export class Player {
   // --- AI surface -------------------------------------------------------
 
   /**
+   * game/player.cpp: Player::calcIncome -- what this player collects per turn.
+   * Each building truncates its own income before the sum, so rounding once at
+   * the end would drift by a few funds a turn.
+   */
+  calcIncome(modifier = 1): number {
+    let income = 0;
+    for (let y = 0; y < this.map.getMapHeight(); y++) {
+      for (let x = 0; x < this.map.getMapWidth(); x++) {
+        const building = this.map.getTerrain(x, y).getBuilding();
+        if (building?.getOwner() !== this) continue;
+        income += Math.trunc(building.getIncome() * modifier);
+      }
+    }
+    return income;
+  }
+
+  /**
+   * game/player.cpp: Player::isPlayerIdEnemy / isPlayerIdAlly.
+   *
+   * Both answer true for an out-of-range id, matching the C++, which reports the
+   * error and falls through to the default rather than throwing.
+   */
+  isPlayerIdEnemy(playerId: number): boolean {
+    const other = this.map.getPlayer(playerId);
+    if (!other) return true;
+    return this.checkAlliance(other) === GameEnums.Alliance_Enemy;
+  }
+
+  isPlayerIdAlly(playerId: number): boolean {
+    const other = this.map.getPlayer(playerId);
+    if (!other) return true;
+    return this.checkAlliance(other) === GameEnums.Alliance_Friend;
+  }
+
+  /**
    * game/player.cpp: Player::getAverageCost -- mean getBaseCost over every unit
    * script, used to split "cheap" from "expensive" when valuing a silo strike.
    * Lazily cached exactly as the C++ caches m_averageCosts.

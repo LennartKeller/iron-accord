@@ -51,6 +51,8 @@ Two payoffs, and the second is the one the evidence actually supports.
 |---|---|
 | `config.ts` | generated from `ai/normalai.cpp`'s `m_iniData` + `resources/aidata/normal/normal.ini` |
 | `ini.ts` | `CoreAI::randomizeIni` |
+| `islandmap.ts` | `ai/islandmap.cpp` |
+| `influencefrontmap.ts` | `ai/influencefrontmap.cpp`, minus the front lines |
 
 Regenerate the config after updating `ext/` with:
 
@@ -69,3 +71,26 @@ Qt writes a user settings group named `General` as `[%General]` on disk, because
 QSettings reserves the plain `General` section for ungrouped keys. Reading the
 literal name finds nothing, which would have silently dropped 15 of the 126
 knobs -- `DirectIndirectRatio` and `MinMovementDamage` among them.
+
+## Landmines carried over deliberately
+
+`NormalAi::getMapInfluenceModifier` divides by `ownInfluence` on a branch that
+only guards `enemyInfluence > 0`, so a tile where the AI has no influence at all
+yields infinity, and that infinity is added straight to a counter-damage score.
+This is reachable: `increaseInfluence` takes a `qint32`, so a fractional
+contribution truncates to zero on tiles far from anything the AI owns.
+
+JavaScript numbers are IEEE doubles like the C++ floats, so a literal
+transcription reproduces upstream exactly, infinity included -- no deviation is
+needed to stay faithful, and none is made. If the ported AI turns out to refuse
+to leave its own territory, this is the first place to look.
+
+## Front lines are not ported
+
+`InfluenceFrontMap` upstream also derives *front lines*: contiguous runs of
+contested tiles grouped by which movement types can cross them, via
+`findFrontLineTiles`, `createFrontLine` and a recursive `searchFrontLine`, into
+the `frontMovetype` / `frontOwners` fields. Nothing reads any of it back --
+`NormalAi` touches only `getOwnInfluence()` and `getEnemyInfluence()`, and the
+rest exists to colour a debug overlay. Around 250 lines of recursive grouping,
+skipped as pure risk with no gameplay effect.

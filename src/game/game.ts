@@ -766,21 +766,7 @@ export class Game {
    * building truncates its own `baseIncome * fundsModifier` before the sum —
    * rounding once at the end drifts by a few funds per turn.
    */
-  calcIncome(player: Player): number {
-    const modifier = this.fundsModifier(player);
-    let income = 0;
-    for (let y = 0; y < this.map.height; y++) {
-      for (let x = 0; x < this.map.width; x++) {
-        const building = this.map.getTerrain(x, y).getBuilding();
-        if (!building || building.getOwner() !== player) continue;
-        const base = this.registry[building.getBuildingID()]?.getBaseIncome?.(building, this.map);
-        income += Math.trunc((typeof base === 'number' ? base : 0) * modifier);
-      }
-    }
-    return income;
-  }
-
-  private fundsModifier(player: Player): number { return player.getFundsModifier(); }
+  calcIncome(player: Player): number { return player.calcIncome(); }
 
   /** game/gamemap.cpp: end-of-turn hooks for the player who just finished. */
   private endOfTurn(player: Player): void {

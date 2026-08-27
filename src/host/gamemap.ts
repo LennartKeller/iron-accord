@@ -164,6 +164,23 @@ export class GameMap {
   }
 
   /**
+   * resource_management/unitspritemanager.h: getMovementType(unitId).
+   *
+   * The same answer without needing an instance, which is what the AI wants
+   * when it is reasoning about a unit it has not built yet. Asks the unit
+   * script directly rather than spawning a probe, so it issues no uid.
+   */
+  movementTypeOfId(unitID: string): string {
+    let type = this.movementTypes.get(unitID);
+    if (type === undefined) {
+      const result = this.registry[unitID]?.getMovementType?.();
+      type = typeof result === 'string' ? result : '';
+      this.movementTypes.set(unitID, type);
+    }
+    return type;
+  }
+
+  /**
    * Rebuilds the tile→unit index in units-array order, first unit winning a
    * contested tile — exactly what the linear `find` this replaces returned.
    * Keyed x-major so off-map coordinates stay distinct instead of aliasing a
