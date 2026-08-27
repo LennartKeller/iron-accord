@@ -828,6 +828,20 @@ export class Unit {
   getAiPriority(): number { return this.aiPriority; }
   setAiPriority(priority: number): void { this.aiPriority = priority; }
 
+  /**
+   * game/unit.cpp: Unit::isStatusStealthedAndInvisible -- hidden *and* actually
+   * unseen by this player. The AI charges a malus for shooting at one, since a
+   * unit it cannot see may not be where it thinks.
+   *
+   * Returns the verdict together with whether terrain (rather than a status) is
+   * what is hiding it, which the C++ passes back through a reference parameter.
+   */
+  isStatusStealthedAndInvisible(player: Player): { hidden: boolean; terrainHide: boolean } {
+    const terrainHide = this.hasTerrainHide(player);
+    const hidden = (this.isStatusStealthed() || terrainHide) && this.isStealthed(player);
+    return { hidden, terrainHide };
+  }
+
   /** game/unit.cpp: Unit::hasTerrainHide -- hidden in woods/reef under fog. */
   hasTerrainHide(player: Player): boolean {
     if (this.map.getGameRules().getFogMode() === 0) return false;

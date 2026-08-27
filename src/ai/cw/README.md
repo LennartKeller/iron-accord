@@ -55,6 +55,7 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `influencefrontmap.ts` | `ai/influencefrontmap.cpp`, minus the front lines |
 | `targetedpfs.ts` | `ai/targetedunitpathfindingsystem.cpp` + the A* in `coreengine/pathfindingsystem.cpp` |
 | `damage.ts` | `CoreAI::getBaseDamage` / `calcVirtuelUnitDamage` / `calcBuildingDamage` / `calcFundsDamage` |
+| `targets.ts` | `CoreAI::getAttackTargets` / `getBestTarget` / `isAttackOnTerrainAllowed` |
 
 Regenerate the config after updating `ext/` with:
 
