@@ -19,7 +19,7 @@ import { cwRoot } from '../src/cw/resources.node.ts';
 import { Game } from '../src/game/game.ts';
 import { GameEnvironment, HeuristicAgent, PlannerAgent, HeuristicEvaluator, playMatch } from '../src/ai/index.ts';
 import { DEFAULT_PLANNER_OPTIONS } from '../src/ai/planner.ts';
-import { BudgetedValueNet } from '../src/ai/onnx-evaluator.ts';
+import { BudgetedValueNet, ValueNetPolicy } from '../src/ai/onnx-evaluator.ts';
 import { loadValueNet } from '../src/ai/valuenet.node.ts';
 import { NormalAi } from '../src/ai/cw/normalai.ts';
 import { GameEnums } from '../src/host/index.ts';
@@ -37,7 +37,24 @@ const evaluator = fs.existsSync(modelPath) ? await loadValueNet(modelPath) : nul
 const budgeted = evaluator
   ? new BudgetedValueNet(evaluator, new HeuristicEvaluator(), maxPerLayer) : null;
 
-type Side = 'normalai' | 'greedy' | 'plain' | 'net';
+/**
+ * The policy head, when the model was trained with one.
+ *
+ * Without it the net can only re-rank a shortlist the hand-priced scorer chose,
+ * so a move that scorer misprices is never searched at all. With it the net
+ * decides what to search as well as how to score it -- which is the whole point
+ * of cloning an AI's actions rather than only its outcomes.
+ */
+const policy = (() => {
+  if (!evaluator) return null;
+  const metaPath = modelPath.replace(/\.onnx$/, '') + '.json';
+  if (!fs.existsSync(metaPath)) return null;
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  if (!meta.actions || !meta.actionNames?.length) return null;
+  return new ValueNetPolicy(evaluator, meta.actionNames);
+})();
+
+type Side = 'normalai' | 'greedy' | 'plain' | 'net' | 'policy';
 
 function agentFor(side: Side, seed: number): Agent {
   switch (side) {
@@ -51,6 +68,12 @@ function agentFor(side: Side, seed: number): Agent {
       return new PlannerAgent({
         timeBudgetMs: budget, nodeBudget, opponentReplyActions: replyActions,
         evaluator: budgeted ?? undefined,
+      });
+    case 'policy':
+      return new PlannerAgent({
+        timeBudgetMs: budget, nodeBudget, opponentReplyActions: replyActions,
+        evaluator: budgeted ?? undefined,
+        policy: policy ?? undefined,
       });
   }
 }
@@ -139,6 +162,15 @@ if (Math.abs(selfMirror - 0.5) > 1e-9) {
 }
 console.log('');
 
-await series('normalai v greedy', 'normalai', 'greedy', maps, fogs);
-await series('normalai v plain planner', 'normalai', 'plain', maps, fogs);
+const only = process.env.ONLY ?? '';
+if (!only) {
+  await series('normalai v greedy', 'normalai', 'greedy', maps, fogs);
+  await series('normalai v plain planner', 'normalai', 'plain', maps, fogs);
+}
 if (budgeted) await series('normalai v net planner', 'normalai', 'net', maps, fogs);
+if (policy) {
+  // The teacher against its student: a net cloning NormalAi's actions should
+  // land below it, and by how much is the number this dataset was built for.
+  await series('normalai v policy planner', 'normalai', 'policy', maps, fogs);
+  await series('policy planner v greedy', 'policy', 'greedy', maps, fogs);
+}

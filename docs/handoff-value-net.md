@@ -79,6 +79,50 @@ old price-ranked one 0.667, so 0.828 against it is worth more than the 0.898 an
 earlier net scored against the weak one. Rates from different eras of this
 project are NOT comparable.
 
+**Generating from a FAMILY of opponents works; the policy head does not.**
+
+`CoreAI::randomizeIni` turns one AI into many: every one of the 126 tunables
+resampled uniformly across its range. Twelve probed variants all beat greedy
+(min 0.555, median 0.953) and seven of eleven beat the shipped profile's 0.906,
+so `normal.ini` is not a good local optimum. 30,000 games were generated with a
+different mutated opponent in every seat of every game -- the first dataset here
+whose *generator* is a distribution rather than a policy -- giving 3.71M
+positions at a 39/23/38 win/draw/loss split and zero unreplayable games.
+
+Trained on it, three models (all 400 nodes, 16 held-out maps, both seats and
+fog modes):
+
+| configuration | policy top-1 | v NormalAi | v greedy |
+|---|---|---|---|
+| base2-net (previous best) | -- | 0.320 | 0.867 |
+| new 64x6, net alone | 43.6% | 0.344 | -- |
+| new 96x10, net alone | 50.1% | **0.391** | -- |
+| new 64x6, policy-guided | 43.6% | 0.258 | 0.648 |
+| new 96x10, policy-guided | 50.1% | 0.281 | 0.586 |
+| NormalAi | -- | -- | 0.906 |
+
+Three results.
+
+**The diversity lever is real.** The best evaluator this project has trained came
+from varied opponents, not from stronger ones: 0.391 against NormalAi versus
+base2-net's 0.320. It is also the first model whose trunk carries the value head
+rather than leaning on the scalars -- the ablation cost fell from -303% to -47%.
+
+**The policy head is actively harmful, and better imitation makes it worse.**
+Policy guidance costs 0.09 to 0.11 in both models. The 96x10 model imitates
+NormalAi more accurately (50.1% top-1 against 43.6%) and yet plays *worse* when
+policy-guided (0.586 against greedy, versus 0.648). That is not under-fitting: a
+policy that predicts the teacher's actions better produces a weaker search.
+Constraining the beam to the policy's preferences is worse than letting the
+value net rank a broader shortlist, which is what the earlier 1600-node collapse
+was already saying. Do not spend more on the policy head without changing how
+search consumes it.
+
+**Capacity buys imitation, not evaluation.** Across 12 epochs, 40 epochs, and
+40 epochs at 96x10, value ranking never moved (0.752-0.756) while policy top-1
+went 41.3% -> 43.6% -> 50.1%. Training length plateaued by epoch 30; width and
+depth did not. The value head has saturated on this data.
+
 **The value net is weaker than a conventional hand-written AI.** Commander
 Wars' own NormalAi is now ported (`src/ai/cw/`, see its README) and benchmarked
 on the same 16 held-out maps, both seats, both fog modes, 400 nodes -- the exact
