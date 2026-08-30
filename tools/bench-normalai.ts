@@ -168,7 +168,9 @@ if (!only) {
   await series('normalai v plain planner', 'normalai', 'plain', maps, fogs);
 }
 if (budgeted) await series('normalai v net planner', 'normalai', 'net', maps, fogs);
-if (policy) {
+// ONLY=net stops here: the policy series cost more than everything else
+// combined and policy guidance is already measured as harmful.
+if (policy && only !== 'net') {
   // The teacher against its student: a net cloning NormalAi's actions should
   // land below it, and by how much is the number this dataset was built for.
   await series('normalai v policy planner', 'normalai', 'policy', maps, fogs);

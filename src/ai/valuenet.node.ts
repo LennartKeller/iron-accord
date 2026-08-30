@@ -39,7 +39,13 @@ export async function loadValueNet(modelPath = 'models/value.onnx'): Promise<Val
         error instanceof Error ? error.message : error);
     }
   }
-  session ??= await ort.InferenceSession.create(resolved);
+  // Without a cap, every session takes ORT's default intra-op pool of one
+  // thread per core -- 30 self-play workers on a 32-core box is ~960 threads
+  // and a load average in the hundreds. One thread per worker is right when
+  // the workers themselves are the parallelism.
+  const intraOpNumThreads = Number(process.env.ORT_INTRA_THREADS ?? 0) || undefined;
+  session ??= await ort.InferenceSession.create(
+    resolved, intraOpNumThreads ? { intraOpNumThreads } : {});
 
   return new ValueNetEvaluator(
     session as never,

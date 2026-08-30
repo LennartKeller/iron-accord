@@ -79,6 +79,43 @@ old price-ranked one 0.667, so 0.828 against it is worth more than the 0.898 an
 earlier net scored against the weak one. Rates from different eras of this
 project are NOT comparable.
 
+**Diverse expert iteration reaches parity with NormalAi.** One iteration of
+the corrected loop -- 12,000 games of the 96x10 net-planner (epsilon 0.10, 200
+nodes) against a FRESHLY MUTATED NormalAi in every game, merged with the 30,000
+family games, trained at 128x12 -- and the learned player has caught the ported
+one:
+
+| vs NormalAi, 16 held-out maps | rate |
+|---|---|
+| base2-net, 400 nodes | 0.320 |
+| 96x10 on family data, 400 nodes | 0.391 |
+| mix2 128x12, 400 nodes | 0.484 |
+| mix2 128x12, 1600 nodes | **0.500** (30W 30L 4D, 0.500 in both fog modes) |
+
+Why this ExIt iteration compounded when the earlier one collapsed: the generator
+stayed a DISTRIBUTION. Plain planner self-play converges and narrows the
+position pool; here every game had a different mutated opponent while the
+planner's counterfactuals still entered the data. Volume was not controlled this
+time -- the gain may partly be the extra 12k games -- but the earlier
+volume-controlled result showed planner-flavoured volume alone made things
+WORSE, so the direction of the effect is not in doubt.
+
+Depth converts cleanly against a real opponent (0.484 -> 0.500 from 400 to 1600
+nodes), and it is what closed the fog gap (fog-war 0.437 -> 0.500): search
+partially compensates for what the current-vision encoder cannot see. At 400
+nodes the net already wins the fog-off half (0.531).
+
+Also closed as a side effect: the ~3.3% of planner games that never replayed.
+Zero of 12,000 planner games dropped after the TERRAIN/BUILDING onDestroyed
+repair (see src/scripts/repairs.ts) -- structure destruction threw inside an
+animation callback and desynchronised the board, at about the rate planner games
+shoot structures. The extraction-time discard stays as a guard.
+
+The natural next iteration: generate from the parity-strength net (more nodes,
+lower epsilon) against the family plus best-variant NormalAis, add belief
+channels for the remaining fog weakness, and distill for shipping -- the 15.4 MB
+128x12 is a training artefact, not a deliverable.
+
 **Generating from a FAMILY of opponents works; the policy head does not.**
 
 `CoreAI::randomizeIni` turns one AI into many: every one of the 126 tunables
