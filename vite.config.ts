@@ -6,13 +6,13 @@ import { defineConfig, type Plugin } from 'vite';
 /** Only generated runtime assets belong in the site; data/ also holds training runs. */
 const runtimeEntries = ['scripts.json', 'scenes', 'sprites', 'colortables'];
 
-function runtimeDataAssets(): Plugin {
+export function runtimeDataAssets(dataDir = path.resolve('data')): Plugin {
   return {
     name: 'iron-accord:runtime-data',
     apply: 'build',
     generateBundle() {
       const emit = (relative: string): void => {
-        const full = path.resolve('data', relative);
+        const full = path.resolve(dataDir, relative);
         if (!fs.existsSync(full)) return;
         if (fs.statSync(full).isDirectory()) {
           for (const name of fs.readdirSync(full).sort()) emit(`${relative}/${name}`);

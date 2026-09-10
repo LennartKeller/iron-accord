@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import config from '../vite.config.ts';
+import { afterEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import config, { runtimeDataAssets } from '../vite.config.ts';
 
 type Asset = { type: 'asset'; fileName: string; source: string | Uint8Array };
 type Bundle = Record<string, Asset>;
@@ -8,24 +11,41 @@ type BuildPlugin = {
   generateBundle: (this: { emitFile(asset: Asset): void; error(message: string): never }, options: object, bundle: Bundle) => void;
 };
 const plugins = config.plugins as BuildPlugin[];
-function emitFrom(name: string, bundle: Bundle = {}): Asset[] {
+function emitFrom(name: string | BuildPlugin, bundle: Bundle = {}): Asset[] {
   const assets: Asset[] = [];
-  plugins.find(plugin => plugin.name === name)!.generateBundle.call({
+  const plugin = typeof name === 'string' ? plugins.find(plugin => plugin.name === name)! : name;
+  plugin.generateBundle.call({
     emitFile: asset => { assets.push(asset); bundle[asset.fileName] = asset; },
     error: message => { throw new Error(message); },
   }, {}, bundle);
   return assets;
 }
 
+let fixture: string | undefined;
+afterEach(() => {
+  if (fixture) fs.rmSync(fixture, { recursive: true, force: true });
+  fixture = undefined;
+});
+
 describe('production assets', () => {
   it('ships runtime data without copying training runs from the public directory', () => {
     expect(config.build?.copyPublicDir).toBe(false);
-    const assets = emitFrom('iron-accord:runtime-data');
-    expect(assets.some(asset => asset.fileName === 'scripts.json')).toBe(true);
-    for (const directory of ['scenes', 'sprites', 'colortables']) {
-      expect(assets.some(asset => asset.fileName === `${directory}/index.json`)).toBe(true);
+    // CI runs tests before build:data. Use a complete, tiny data directory
+    // rather than depending on assets left over from a local build.
+    fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-accord-assets-'));
+    const runtime = [
+      'scripts.json', 'scenes/index.json', 'scenes/example.json',
+      'sprites/index.json', 'sprites/infantry.png',
+      'colortables/index.json', 'colortables/orange_star.png',
+    ];
+    for (const file of [...runtime, 'training.jsonl', 'positions/run/data.bin']) {
+      const full = path.join(fixture, file);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, `fixture:${file}`);
     }
-    expect(assets.every(asset => /^(scripts\.json$|scenes\/|sprites\/|colortables\/)/.test(asset.fileName))).toBe(true);
+    const assets = emitFrom(runtimeDataAssets(fixture) as BuildPlugin);
+    expect(assets.map(asset => asset.fileName).sort()).toEqual([...runtime].sort());
+    for (const asset of assets) expect(String(asset.source)).toBe(`fixture:${asset.fileName}`);
   });
 
   it('changes the service-worker version when emitted runtime assets change', () => {
