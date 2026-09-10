@@ -47,9 +47,32 @@ export class TacticalPanel {
   private reset(battle: boolean): void {
     this.generation++;
     this.element.replaceChildren();
+    this.element.removeAttribute('style');
+    this.element.classList.remove('tactical-panel--below');
     this.element.hidden = false;
     this.element.classList.toggle('tactical-panel--battle', battle);
     this.element.setAttribute('aria-label', battle ? 'Combat preview' : 'Unit information');
+  }
+
+  /** Keep confirmation beside the gesture, flipping below when there is less room above. */
+  positionBattle(anchor: Tile, bounds: { left: number; top: number; right: number; bottom: number }): void {
+    if (this.element.hidden || !this.element.classList.contains('tactical-panel--battle')) return;
+    const panel = this.element;
+    panel.style.maxWidth = `${Math.max(0, bounds.right - bounds.left)}px`;
+    panel.style.maxHeight = `${Math.max(0, bounds.bottom - bounds.top)}px`;
+    const height = panel.getBoundingClientRect().height;
+    const above = anchor.y - bounds.top - 12;
+    const below = bounds.bottom - anchor.y - 12;
+    const placeBelow = height > above && below > above;
+    panel.classList.toggle('tactical-panel--below', placeBelow);
+    const rect = panel.getBoundingClientRect();
+    const fire = panel.querySelector<HTMLElement>('.tactical-button--fire')!.getBoundingClientRect();
+    const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(value, max));
+    // Align Fire with the pointer horizontally; keep a gap so the opening tap
+    // never lands on a newly appeared button and the target stays visible.
+    panel.style.left = `${clamp(anchor.x - (fire.x + fire.width / 2 - rect.x), bounds.left, bounds.right - rect.width)}px`;
+    panel.style.top = `${clamp(placeBelow ? anchor.y + 12 : anchor.y - rect.height - 12,
+      bounds.top, bounds.bottom - rect.height)}px`;
   }
 
   private portrait(unit: Unit): HTMLCanvasElement {

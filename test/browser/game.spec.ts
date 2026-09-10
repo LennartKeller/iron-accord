@@ -51,6 +51,7 @@ async function tapTile(page: Page, x: number, y: number) {
   }, { x, y });
   if (test.info().project.name === 'mobile') await page.touchscreen.tap(point.x, point.y);
   else await page.mouse.click(point.x, point.y);
+  return point;
 }
 
 async function savedGame(page: Page): Promise<SavedGame> {
@@ -81,7 +82,7 @@ test('start, move, preview, fire, and resume the committed match', async ({ page
   await tapTile(page, 3, 3);
   await tapTile(page, 4, 3);
   await page.locator('#menu').getByRole('button', { name: 'Fire', exact: true }).click();
-  await tapTile(page, 5, 3);
+  const targetPoint = await tapTile(page, 5, 3);
   const preview = page.getByRole('region', { name: 'Combat preview' });
   await expect(preview).toBeVisible();
   const bounds = await preview.boundingBox();
@@ -89,7 +90,27 @@ test('start, move, preview, fire, and resume the committed match', async ({ page
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(footer!.y + 1);
+  const fireBounds = await preview.getByRole('button', { name: 'Fire', exact: true }).boundingBox();
+  expect(Math.hypot(fireBounds!.x + fireBounds!.width / 2 - targetPoint.x,
+    fireBounds!.y + fireBounds!.height / 2 - targetPoint.y)).toBeLessThan(90);
+  expect(bounds!.y > targetPoint.y || bounds!.y + bounds!.height < targetPoint.y).toBe(true);
+
   expect(await savedGame(page)).toEqual(resumed);
+  await page.screenshot({ path: test.info().outputPath('attack-preview.png') });
+  const originalViewport = page.viewportSize()!;
+  for (const viewport of [{ width: 320, height: 480 }, { width: 800, height: 420 }]) {
+    await page.setViewportSize(viewport);
+    await expect(async () => {
+      const rect = (await preview.boundingBox())!;
+      const top = (await page.locator('header').boundingBox())!;
+      const bottom = (await page.locator('footer').boundingBox())!;
+      expect(rect.x).toBeGreaterThanOrEqual(8);
+      expect(rect.x + rect.width).toBeLessThanOrEqual(viewport.width - 8);
+      expect(rect.y).toBeGreaterThanOrEqual(top.y + top.height + 7);
+      expect(rect.y + rect.height).toBeLessThanOrEqual(bottom.y - 7);
+    }).toPass();
+  }
+  await page.setViewportSize(originalViewport);
 
   await preview.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(preview).not.toBeVisible();

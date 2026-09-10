@@ -65,3 +65,13 @@
   .bar--bottom #fit { display: none; }
   body:has(.tactical-panel:not([hidden])) .bar--bottom .status { display: none; }
 }
+
+/* Combat confirmation follows the selected target on desktop and touch screens. */
+.tactical-panel--battle {
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  right: auto;
+  bottom: auto;
+}
+.tactical-panel--below .tactical-controls { order: -1; margin-bottom: 10px; }

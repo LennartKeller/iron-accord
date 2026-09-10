@@ -169,6 +169,18 @@ let mode: Mode = 'idle';
 let actor: Unit | null = null;
 let destination: { x: number; y: number } | null = null;
 
+let battleAnchor: { x: number; y: number } | null = null;
+function positionBattle(): void {
+  if (!battleAnchor || tacticalPanel.element.hidden) return;
+  const point = renderer.camera.worldToScreen(battleAnchor.x, battleAnchor.y);
+  const canvasRect = canvas.getBoundingClientRect();
+  tacticalPanel.positionBattle({ x: point.x + canvasRect.left, y: point.y + canvasRect.top }, {
+    left: 8, right: window.innerWidth - 8,
+    top: $('.bar--top').getBoundingClientRect().bottom + 8,
+    bottom: $('.bar--bottom').getBoundingClientRect().top - 8,
+  });
+}
+
 let frameQueued = false;
 function requestRender(): void {
   if (frameQueued) return;
@@ -176,6 +188,7 @@ function requestRender(): void {
   requestAnimationFrame(() => {
     frameQueued = false;
     renderer.camera.clampTo(renderer.worldWidth, renderer.worldHeight);
+    positionBattle();
     const wasAnimating = renderer.isAnimating;
     renderer.render();
     if (renderer.isAnimating) requestRender();
@@ -854,6 +867,7 @@ function onTap(screenX: number, screenY: number): void {
       const attackingUnit = actor;
       const from = { ...destination };
       renderer.selected = { x: hit.x, y: hit.y };
+      battleAnchor = renderer.camera.screenToWorld(screenX, screenY);
       tacticalPanel.showBattle(game, actor, from, hit, () => {
         if (game !== attackingGame || !game.canControl(attackingUnit) || renderer.isAnimating) return;
         presentAction(attackingUnit, from, () => game!.attack(attackingUnit, from, hit));
@@ -863,6 +877,7 @@ function onTap(screenX: number, screenY: number): void {
         statusEl.textContent = 'Pick a target';
         requestRender();
       });
+      positionBattle();
       tacticalPanel.element.querySelector<HTMLButtonElement>('.tactical-button--fire')?.focus({ preventScroll: true });
       requestRender();
       return;
@@ -1450,6 +1465,7 @@ window.addEventListener('resize', () => { renderer.resize(); requestRender(); })
 new ResizeObserver(() => {
   document.documentElement.style.setProperty('--tactical-bottom',
     `${window.innerHeight - $('.bar--bottom').getBoundingClientRect().top + 12}px`);
+  positionBattle();
 }).observe($('.bar--bottom'));
 
 async function main(): Promise<void> {
