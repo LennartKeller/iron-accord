@@ -1,6 +1,8 @@
+import { isKnownBuilding, visibleUnitAt } from './visibility.ts';
 import type { Game } from '../../game/game.ts';
 import type { MovementRange } from '../../game/pathfinding.ts';
 import type { Player, Terrain, Unit } from '../../host/index.ts';
+import { getCircle } from '../../host/globals.ts';
 import { calcFundsDamage, type DamagePredictor } from './damage.ts';
 
 /** ai/coreai.h: CoreAI::DamageData -- one attack the AI is considering. */
@@ -10,7 +12,7 @@ export interface DamageData {
   y: number;
   /** Net funds swing, counter-attack already subtracted. */
   fundsDamage: number;
-  /** HP taken off the defender. */
+  /** HP taken off the defender; the upstream fast support path stores net HP here. */
   hpDamage: number;
   /** HP swing in our favour: damage dealt minus damage taken back. */
   hpDamageDifference: number;
@@ -42,6 +44,7 @@ export function isAttackOnTerrainAllowed(
 ): boolean {
   if (damage < options.minTerrainDamage) return false;
   const building = terrain.getBuilding();
+  if (building && !isKnownBuilding(building, player)) return false;
   if (options.enableNeutralTerrainAttack && terrain.getHp() > 0) return true;
   if (building !== null && building.getHp() > 0) {
     const owner = building.getOwner();
@@ -118,7 +121,7 @@ export function getAttackTargets(
       if (tile.cost > maxDistance) continue;
       // Occupied tiles are not places to shoot from, including our own -- the
       // starting tile was already scored above.
-      if (game.map.getTerrain(tile.x, tile.y).getUnit() !== null) continue;
+      if (visibleUnitAt(game.map, unit.getOwner(), tile.x, tile.y) !== null) continue;
       attacksFromField(game, predictor, unit, tile, options, targets, moveTargetFields);
     }
   }
@@ -141,34 +144,8 @@ export function getBestTarget(
 ): { targets: MoveTargetField[]; moveTargetFields: MoveTargetField[] } {
   const targets: MoveTargetField[] = [];
   const moveTargetFields: MoveTargetField[] = [];
-  const player = unit.getOwner();
-
   const consider = (from: { x: number; y: number }): void => {
-    for (const target of game.attackTargets(unit, from)) {
-      const damage = predictor.calcVirtualUnitDamage(
-        unit, 0, from, target.unit, 0, { x: target.x, y: target.y });
-      let score: number;
-      if (target.unit !== null) {
-        const funds = calcFundsDamage(damage, unit, target.unit, options.ownUnitValue);
-        if (funds.hpDamage < options.minHpDamage) continue;
-        score = funds.fundsDamage;
-      } else {
-        const terrain = game.map.getTerrain(target.x, target.y);
-        if (!isAttackOnTerrainAllowed(terrain, damage.x, player, options)) continue;
-        score = damage.x * options.buildingValue;
-      }
-      // Upstream compares the raw damage against the stored score in the
-      // terrain branch while storing damage * BuildingValue. The two agree
-      // whenever BuildingValue is 1, which every shipped profile sets.
-      if (targets.length === 0 || score > targets[0].z) {
-        targets.length = 0;
-        moveTargetFields.length = 0;
-      } else if (score !== targets[0].z) {
-        continue;
-      }
-      targets.push({ x: target.x, y: target.y, z: score });
-      moveTargetFields.push({ x: from.x, y: from.y, z: 1 });
-    }
+    appendBestAttacksFromField(game, predictor, unit, from, options, targets, moveTargetFields);
   };
 
   const here = { x: unit.getX(), y: unit.getY() };
@@ -176,9 +153,86 @@ export function getBestTarget(
   if (unit.canMoveAndFire(here)) {
     for (const tile of range.tiles.values()) {
       if (tile.cost > maxDistance) continue;
-      if (game.map.getTerrain(tile.x, tile.y).getUnit() !== null) continue;
+      if (visibleUnitAt(game.map, unit.getOwner(), tile.x, tile.y) !== null) continue;
       consider(tile);
     }
   }
   return { targets, moveTargetFields };
+}
+
+/** Best funds trades from one firing tile, using the same gates as getBestTarget. */
+export function getBestAttacksFromField(
+  game: Game, predictor: DamagePredictor, unit: Unit, from: { x: number; y: number },
+  options: TargetScoringOptions,
+): { targets: MoveTargetField[]; moveTargetFields: MoveTargetField[] } {
+  const targets: MoveTargetField[] = [];
+  const moveTargetFields: MoveTargetField[] = [];
+  appendBestAttacksFromField(game, predictor, unit, from, options, targets, moveTargetFields);
+  return { targets, moveTargetFields };
+}
+
+function appendBestAttacksFromField(
+  game: Game, predictor: DamagePredictor, unit: Unit, from: { x: number; y: number },
+  options: TargetScoringOptions, targets: MoveTargetField[], moveTargetFields: MoveTargetField[],
+): void {
+  const player = unit.getOwner();
+  for (const target of game.attackTargets(unit, from)) {
+    const damage = predictor.calcVirtualUnitDamage(
+      unit, 0, from, target.unit, 0, { x: target.x, y: target.y });
+    let score: number;
+    if (target.unit !== null) {
+      const funds = calcFundsDamage(damage, unit, target.unit, options.ownUnitValue);
+      if (funds.hpDamage < options.minHpDamage) continue;
+      score = funds.fundsDamage;
+    } else {
+      const terrain = game.map.getTerrain(target.x, target.y);
+      if (!isAttackOnTerrainAllowed(terrain, damage.x, player, options)) continue;
+      score = damage.x * options.buildingValue;
+    }
+    // Upstream compares the raw damage against the stored score in the
+    // terrain branch while storing damage * BuildingValue. The two agree
+    // whenever BuildingValue is 1, which every shipped profile sets.
+    if (targets.length === 0 || score > targets[0].z) {
+      targets.length = 0;
+      moveTargetFields.length = 0;
+    } else if (score !== targets[0].z) {
+      continue;
+    }
+    targets.push({ x: target.x, y: target.y, z: score });
+    moveTargetFields.push({ x: from.x, y: from.y, z: 1 });
+  }
+}
+
+/**
+ * CoreAI::getAttackTargetsFast: support estimates use base weapon damage and
+ * net HP, including upstream's repeated-attacker counter approximation. This
+ * scans occupied tiles, including allies; it does not propose executable shots.
+ */
+export function getAttackTargetsFast(
+  game: Game, predictor: DamagePredictor, unit: Unit, range: MovementRange,
+  ownUnitValue: number, minFireRange: number, maxFireRange: number,
+  maxDistance = Number.MAX_SAFE_INTEGER,
+): DamageData[] {
+  const targets: DamageData[] = [];
+  const firePoints = getCircle(minFireRange, maxFireRange);
+  const consider = (from: { x: number; y: number }): void => {
+    for (const offset of firePoints) {
+      const x = from.x + offset.x, y = from.y + offset.y;
+      if (!game.map.onMap(x, y)) continue;
+      const defender = visibleUnitAt(game.map, unit.getOwner(), x, y);
+      if (defender === null) continue;
+      const funds = calcFundsDamage(predictor.calcUnitDamageFast(unit, defender), unit, defender, ownUnitValue);
+      targets.push({ x, y, fundsDamage: funds.fundsDamage,
+        hpDamage: funds.hpDamage, hpDamageDifference: funds.hpDamage });
+    }
+  };
+  const here = { x: unit.getX(), y: unit.getY() };
+  consider(here);
+  if (unit.canMoveAndFire(here)) {
+    for (const tile of range.tiles.values()) {
+      if (tile.cost > maxDistance || visibleUnitAt(game.map, unit.getOwner(), tile.x, tile.y) !== null) continue;
+      consider(tile);
+    }
+  }
+  return targets;
 }

@@ -28,6 +28,7 @@ export type ActionDescriptor =
       steps?: Array<{ x: number; y: number } | string>;
     }
   | { kind: 'build'; at: { x: number; y: number }; unitId: string }
+  | { kind: 'building'; at: { x: number; y: number }; actionId: string; steps?: Array<{ x: number; y: number } | string> }
   | { kind: 'endTurn' };
 
 export function actionKey(action: ActionDescriptor): string {
@@ -38,6 +39,8 @@ export function actionKey(action: ActionDescriptor): string {
         + (action.steps?.length
           ? ':' + action.steps.map(s => typeof s === 'string' ? s : `${s.x},${s.y}`).join('/')
           : '');
+    case 'building':
+      return `building:${action.at.x},${action.at.y}:${action.actionId}:${JSON.stringify(action.steps ?? [])}`;
     case 'build':
       return `build:${action.at.x},${action.at.y}:${action.unitId}`;
     default:
@@ -154,6 +157,9 @@ export function applyAction(game: Game, action: ActionDescriptor): boolean {
     case 'endTurn':
       game.endTurn();
       return true;
+
+    case 'building':
+      return game.performBuildingAction(action.at, action.actionId, action.steps);
 
     case 'build':
       return game.buildUnit(action.at.x, action.at.y, action.unitId);

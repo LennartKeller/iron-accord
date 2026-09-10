@@ -84,8 +84,14 @@ export class BuildingHost {
     try { this.map.registry[this.buildingID]?.init?.(this, this.map); } catch { /* optional */ }
   }
 
-  getBuildingWidth(): number { return 1; }
-  getBuildingHeigth(): number { return 1; }
+  getBuildingWidth(): number {
+    const value = this.map.registry[this.buildingID]?.getBuildingWidth?.(this.map);
+    return typeof value === 'number' ? Math.trunc(value) : 0;
+  }
+  getBuildingHeigth(): number {
+    const value = this.map.registry[this.buildingID]?.getBuildingHeigth?.(this.map);
+    return typeof value === 'number' ? Math.trunc(value) : 0;
+  }
   getDefensiveBonus(): number {
     const value = this.map.registry[this.buildingID]?.getDefensiveBonus?.(this, this.map);
     return typeof value === 'number' ? value : 0;
@@ -147,8 +153,16 @@ export class BuildingHost {
 
   /** What this building can produce, from its script. */
   getConstructionList(): string[] {
-    const list = this.map.registry[this.buildingID]?.getConstructionList?.(this, this.map)
-      ?? this.map.registry[this.buildingID]?.constructionList;
+    let list: unknown;
+    try {
+      list = this.map.registry[this.buildingID]?.getConstructionList?.(this, this.map)
+        ?? this.map.registry[this.buildingID]?.constructionList;
+    } catch {
+      // Building::getConstructionList converts a failed QJS result to an empty
+      // QStringList. The pinned Black Hole factory script calls a nullable
+      // getCOSpecificUnit callback; its independent door menus still work.
+      return [];
+    }
     if (!Array.isArray(list)) return [];
     // game/building.cpp filters the script's list by what the owner is allowed
     // to build; an empty player list means no restriction.
@@ -290,11 +304,17 @@ export class BuildingHost {
     return isPoint(value) ? { x: value.x, y: value.y } : { x: 0, y: 0 };
   }
 
-  /** game/building.cpp: Building::getActionTargetFields -- null means "no restriction". */
+  /** game/building.cpp: Building::getActionTargetFields returns a QmlVectorPoint. */
   getActionTargetFields(): Array<{ x: number; y: number }> | null {
     const value = this.map.registry[this.buildingID]?.getActionTargetFields?.(this, this.map);
-    if (!Array.isArray(value)) return null;
-    return value.filter(isPoint).map(p => ({ x: p.x, y: p.y }));
+    let points: unknown[];
+    if (Array.isArray(value)) points = value;
+    else if (value && typeof value.size === 'function' && typeof value.at === 'function') {
+      const size = value.size();
+      if (!Number.isSafeInteger(size) || size < 0) return null;
+      points = Array.from({ length: size }, (_, index) => value.at(index));
+    } else return null;
+    return points.filter(isPoint).map(p => ({ x: p.x, y: p.y }));
   }
 }
 

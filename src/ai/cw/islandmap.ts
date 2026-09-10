@@ -15,14 +15,15 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number]> = [
  * is about terrain, not about who is standing on it.
  *
  * Upstream runs an unbounded pathfinding sweep from every unvisited passable
- * tile; a flood fill is the same computation without the queue, and keeping
+ * tile; a flood fill gives the same reachability without weighted routing. Keeping
  * upstream's column-major seed order matters because the component *numbering*
  * is what `getIslandSize` and the production system's island bonuses key on.
  *
  * The edge test is deliberately directional, matching upstream: a tile joins
  * the island being filled if the probe can step into it *from* the tile already
- * in that island. Where movement costs are asymmetric the labelling then
- * depends on seed order, exactly as the C++ sweep does.
+ * in that island. Each sweep may overwrite earlier island labels, matching
+ * upstream even when movement is asymmetric. Only tiles visited by the current
+ * sweep are skipped; seed order therefore determines the final labels.
  */
 export class IslandMap {
   private readonly islands: Int32Array;
@@ -68,7 +69,9 @@ export class IslandMap {
             const nx = cx + dx, ny = cy + dy;
             if (!map.onMap(nx, ny)) continue;
             const at = ny * this.width + nx;
-            if (this.islands[at] !== UNKNOWN_ISLAND) continue;
+            // A fresh upstream sweep can reach and relabel an earlier island.
+            // The current island ID doubles as this sweep's visited marker.
+            if (this.islands[at] === currentIsland) continue;
             if (probe.getMovementCosts(nx, ny, cx, cy) < 0) continue;
             this.islands[at] = currentIsland;
             queue.push(at);

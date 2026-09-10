@@ -1,3 +1,4 @@
+import { isKnownBuilding, visibleUnitAt } from './visibility.ts';
 import type { Game } from '../../game/game.ts';
 import { GameEnums, type BuildingHost, type GameMap, type Player, type Terrain, type Unit } from '../../host/index.ts';
 import type { MovementRange } from '../../game/pathfinding.ts';
@@ -18,7 +19,7 @@ import type { MoveTargetField } from './targets.ts';
  * "where might this unit usefully go".
  *
  * Not ported: CO powers and CO units (absent by design here), save-game
- * serialisation, the flare/Oozium/black-bomb branches, and the predefined AI
+ * serialisation, and the predefined AI
  * modes in coreai_predefinedai.cpp, which only run for units a map author has
  * given an explicit AiMode -- none of ours do.
  */
@@ -32,7 +33,7 @@ export class CoreAI {
    * cannon building covers. Zero everywhere on maps without one.
    */
   readonly moveCostMap: Int32Array;
-  /** Whether a silo strike is currently worth taking, set once per turn. */
+  /** Whether a silo strike is currently worth taking, refreshed for each decision. */
   missileTarget = false;
   /** Whether neutral structures may be shot at; upstream reads it from rules. */
   enableNeutralTerrainAttack = false;
@@ -48,6 +49,43 @@ export class CoreAI {
     this.map = game.map;
     this.predictor = new DamagePredictor(this.map);
     this.moveCostMap = new Int32Array(this.map.getMapWidth() * this.map.getMapHeight());
+    this.createMovementMap();
+  }
+
+  /** ai/coreai.cpp: createMovementMap/addMovementMap, refreshed before routing. */
+  createMovementMap(
+    buildings?: readonly BuildingHost[], enemyBuildings?: readonly BuildingHost[],
+  ): void {
+    if (!buildings || !enemyBuildings) {
+      const own: BuildingHost[] = [], enemy: BuildingHost[] = [];
+      for (let y = 0; y < this.map.height; y++) {
+        for (let x = 0; x < this.map.width; x++) {
+          const building = this.map.getTerrain(x, y).getBuilding();
+          if (!building) continue;
+          if (building.getOwner() === this.player) own.push(building);
+          else if (building.isEnemyBuilding(this.player)) enemy.push(building);
+        }
+      }
+      buildings ??= own;
+      enemyBuildings ??= enemy;
+    }
+    this.moveCostMap.fill(0);
+    for (const building of [...buildings, ...enemyBuildings.filter(building => building.getOwner() !== null)]) {
+      if (!isKnownBuilding(building, this.player)) continue;
+      const targets = building.getBuildingTargets();
+      if (targets !== GameEnums.BuildingTarget_All
+        && !(targets === GameEnums.BuildingTarget_Enemy && this.player.isEnemy(building.getOwner()))) continue;
+      if (building.getFireCount() > 1) continue;
+      const damage = building.getDamage(null);
+      if (!Number.isFinite(damage) || damage === 0) continue;
+      const offset = building.getActionTargetOffset();
+      for (const target of building.getActionTargetFields() ?? []) {
+        const x = building.getX() + offset.x + target.x;
+        const y = building.getY() + offset.y + target.y;
+        if (!this.map.onMap(x, y)) continue;
+        this.moveCostMap[y * this.map.width + x] += damage;
+      }
+    }
   }
 
   // --- islands ----------------------------------------------------------
@@ -97,7 +135,10 @@ export class CoreAI {
   rebuildIsland(units: readonly Unit[]): void {
     for (const unit of units) {
       this.getIslandIndex(unit);
-      for (const loaded of unit.getLoadedUnits()) this.getIslandIndex(loaded);
+      // Enemy cargo is private even when its carrier is visible.
+      if (unit.getOwner() === this.player) {
+        for (const loaded of unit.getLoadedUnits()) this.getIslandIndex(loaded);
+      }
     }
     for (const unitId of this.player.getBuildList()) {
       this.createIslandMap(this.map.movementTypeOfId(unitId), unitId);
@@ -175,10 +216,11 @@ export class CoreAI {
   ): void {
     if (!actions.includes(CwAction.CAPTURE) && !actions.includes(CwAction.MISSILE)) return;
     for (const building of enemyBuildings) {
+      if (!isKnownBuilding(building, this.player)) continue;
       const x = building.getX(), y = building.getY();
       if (!unit.canMoveOver(x, y)) continue;
       if (!building.isCaptureOrMissileBuilding(this.missileTarget)) continue;
-      if (building.getTerrain()?.getUnit() != null) continue;
+      if (visibleUnitAt(this.map, this.player, x, y) !== null) continue;
       targets.push({ x, y, z: distanceModifier });
     }
   }
@@ -187,8 +229,8 @@ export class CoreAI {
    * ai/coreai.cpp: CoreAI::appendAttackTargets -- the empty tiles from which
    * this unit could shoot an enemy, at exactly its maximum range.
    *
-   * A hidden enemy adds a malus so the AI is drawn to it less strongly; the
-   * malus is halved when terrain rather than a status is doing the hiding.
+   * Only observable enemies enter this scan. The upstream concealment
+   * weighting is retained for observable targets.
    */
   appendAttackTargets(
     unit: Unit, enemyUnits: readonly Unit[], targets: MoveTargetField[], distanceModifier: number,
@@ -196,11 +238,11 @@ export class CoreAI {
     const fireRange = unit.getMaxRange({ x: unit.getX(), y: unit.getY() });
     const ring = getCircle(fireRange, fireRange);
     for (const enemy of enemyUnits) {
-      if (!unit.isAttackable(enemy, true)) continue;
+      if (enemy.isStealthed(this.player) || !unit.isAttackable(enemy, true)) continue;
       for (const offset of ring) {
         const x = offset.x + enemy.getX(), y = offset.y + enemy.getY();
         if (!this.map.onMap(x, y)) continue;
-        if (this.map.getTerrain(x, y).getUnit() !== null) continue;
+        if (visibleUnitAt(this.map, this.player, x, y) !== null) continue;
         if (!unit.canMoveOver(x, y)) continue;
         const { hidden, terrainHide } = enemy.isStatusStealthedAndInvisible(this.player);
         const stealthMalus = hidden ? (terrainHide ? 2 : 4) : 0;
@@ -222,11 +264,11 @@ export class CoreAI {
     const fireRange = unit.getMaxRange({ x: unit.getX(), y: unit.getY() });
     const ring = getCircle(fireRange, fireRange);
     for (const enemy of enemyUnits) {
-      if (!unit.isAttackable(enemy, true)) continue;
+      if (enemy.isStealthed(this.player) || !unit.isAttackable(enemy, true)) continue;
       for (const offset of ring) {
         const x = offset.x + enemy.getX(), y = offset.y + enemy.getY();
         if (!this.map.onMap(x, y)) continue;
-        const occupant = this.map.getTerrain(x, y).getUnit();
+        const occupant = visibleUnitAt(this.map, this.player, x, y);
         if (!unit.canMoveOver(x, y) || occupant === null) continue;
         if (occupant.getOwner().checkAlliance(this.player) !== GameEnums.Alliance_Friend) continue;
         const { hidden, terrainHide } = enemy.isStatusStealthedAndInvisible(this.player);
@@ -241,8 +283,9 @@ export class CoreAI {
     unit: Unit, buildings: readonly BuildingHost[], targets: MoveTargetField[],
   ): void {
     for (const building of buildings) {
+      if (!isKnownBuilding(building, this.player)) continue;
       const x = building.getX(), y = building.getY();
-      if (this.map.getTerrain(x, y).getUnit() !== null) continue;
+      if (visibleUnitAt(this.map, this.player, x, y) !== null) continue;
       if (!building.canRepair(unit)) continue;
       targets.push({ x, y, z: 1 });
     }

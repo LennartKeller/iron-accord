@@ -189,6 +189,51 @@ export class Game {
     return this.runPrepared(action, unit, destination);
   }
 
+  /** Reconstruct a building order without applying any of its effects. */
+  private prepareBuildingAction(
+    at: { x: number; y: number }, actionID: string,
+    inputs: ReadonlyArray<{ x: number; y: number } | string>,
+  ): GameAction | null {
+    if (this.over || !Number.isInteger(at.x) || !Number.isInteger(at.y) || !this.map.onMap(at.x, at.y)) return null;
+    const building = this.map.getTerrain(at.x, at.y).getBuilding();
+    if (!building || building.getOwner() !== this.currentPlayer || actionID === 'ACTION_BUILD_UNITS'
+      || !building.getActionList().includes(actionID)) return null;
+    const action = new GameAction(this.map, actionID);
+    action.setTarget(at);
+    try {
+      if (!action.canBePerformed()) return null;
+      for (const input of inputs) {
+        const step = this.stepState(action);
+        if (step.kind === 'field' && typeof input !== 'string'
+          && step.fields.some(point => point.x === input.x && point.y === input.y)) {
+          action.writeDataInt32(input.x);
+          action.writeDataInt32(input.y);
+        } else if (step.kind === 'menu' && typeof input === 'string') {
+          const entry = step.entries.find(entry => entry.actionID === input);
+          if (!entry) return null;
+          action.writeDataString(input);
+          action.setCosts(action.getCosts() + entry.cost);
+        } else return null;
+        action.setInputStep(action.getInputStep() + 1);
+      }
+      return action;
+    } catch { return null; }
+  }
+
+  probeBuildingAction(at: { x: number; y: number }, actionID: string,
+    inputs: ReadonlyArray<{ x: number; y: number } | string> = []): ActionStep {
+    const action = this.prepareBuildingAction(at, actionID, inputs);
+    return action ? this.stepState(action) : { kind: 'invalid' };
+  }
+
+  /** Validate every menu/field choice before committing a building action. */
+  performBuildingAction(at: { x: number; y: number }, actionID: string,
+    inputs: ReadonlyArray<{ x: number; y: number } | string> = []): boolean {
+    const action = this.prepareBuildingAction(at, actionID, inputs);
+    if (!action || !action.isFinalStep() || !action.canBePerformed()) return false;
+    return this.runPrepared(action, null, at);
+  }
+
   // --- multi-step actions -------------------------------------------------
 
   /** An action mid-way through collecting its inputs. */
@@ -310,8 +355,12 @@ export class Game {
       const previous = path[i - 1];
       const occupant = this.map.getUnitAt(point.x, point.y);
       const step = unit.getMovementCosts(point.x, point.y, previous.x, previous.y);
+      // Oozium's own wait action consumes a visible enemy on its destination.
+      // Hidden collisions still trap instead of revealing a target to planning.
+      const consumesEnemy = i === path.length - 1 && action.getActionID() === 'ACTION_HOELLIUM_WAIT'
+        && unit.getIgnoreUnitCollision() && occupant && !occupant.isStealthed(unit.getOwner());
       const collision = occupant && occupant !== unit && unit.getOwner().isEnemyUnit(occupant)
-        && (!unit.getIgnoreUnitCollision() || i === path.length - 1);
+        && !consumesEnemy && (!unit.getIgnoreUnitCollision() || i === path.length - 1);
       if (collision || step < 0) {
         // A preceding ally or zero-cost transit tile is not a legal stopping
         // place. Back up to the last empty, occupiable tile (or the origin).
@@ -337,7 +386,7 @@ export class Game {
   }
 
   /** Performs an action whose inputs are already in its buffer. */
-  private runPrepared(action: GameAction, _unit: Unit, _destination: { x: number; y: number }): boolean {
+  private runPrepared(action: GameAction, _unit: Unit | null, _destination: { x: number; y: number }): boolean {
     action = this.trapAction(action) ?? action;
     const script = this.registry[action.getActionID()];
     if (!script?.perform) return false;
@@ -367,41 +416,23 @@ export class Game {
   }
 
   /**
-   * Tiles a carried unit could be dropped onto.
-   *
-   * Ported from ACTION_UNLOAD.getUnloadFields. The rule that is easy to miss is
-   * the FIRST one: the cargo must be able to stand on the *transport's own*
-   * tile, not merely on the destination. Infantry cannot stand on sea, so a
-   * lander has to be on a beach or in a harbour to disembark — without this
-   * check, boats unload across open coastline, which Advance Wars never allows.
+   * Script-defined drop fields at the transport's planned destination.
+   * A throwaway action preserves the original cargo indexes and lets the script
+   * treat the transport's origin as vacated without moving anything on the board.
+   * Hidden occupants remain apparent drop options; execution still requires an
+   * empty tile, just like ACTION_UNLOAD.performPostAnimation.
    */
-  unloadTargets(transport: Unit, cargoIndex: number): Array<{ x: number; y: number }> {
-    const cargo = transport.loaded[cargoIndex];
-    if (!cargo) return [];
-
-    // ACTION_UNLOAD.isUnloadTerrain: boats cannot unload while on a bridge.
-    const transportTerrainId = this.map.getTerrain(transport.x, transport.y).getID();
-    const boats = ['LANDER', 'BLACK_BOAT', 'CANNONBOAT'];
-    if (boats.includes(transport.getUnitID())
-        && ['BRIDGE', 'BRIDGE1', 'BRIDGE2'].includes(transportTerrainId)) {
-      return [];
-    }
-
-    // Can the cargo occupy the transport's tile at all?
-    if (cargo.getBaseMovementCosts(transport.x, transport.y, transport.x, transport.y) <= 0) {
-      return [];
-    }
-
-    const targets: Array<{ x: number; y: number }> = [];
-    for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]] as Array<[number, number]>) {
-      const x = transport.x + dx;
-      const y = transport.y + dy;
-      if (!this.map.onMap(x, y)) continue;
-      if (this.map.getUnitAt(x, y)) continue;
-      if (cargo.getBaseMovementCosts(x, y, transport.x, transport.y) <= 0) continue;
-      targets.push({ x, y });
-    }
-    return targets;
+  unloadTargets(
+    transport: Unit, cargoIndex: number,
+    at: { x: number; y: number } = transport,
+  ): Array<{ x: number; y: number }> {
+    if (!Number.isInteger(cargoIndex) || !transport.loaded[cargoIndex]
+      || !Number.isInteger(at.x) || !Number.isInteger(at.y) || !this.map.onMap(at.x, at.y)) return [];
+    const action = new GameAction(this.map, 'ACTION_UNLOAD');
+    action.setTargetUnit(transport);
+    action.setMovepath([{ x: at.x, y: at.y }], 0);
+    const fields = this.registry.ACTION_UNLOAD?.getUnloadFields?.(action, cargoIndex, this.map);
+    return Array.isArray(fields) ? fields.map(field => ({ x: field.x, y: field.y })) : [];
   }
 
   /**
@@ -458,7 +489,8 @@ export class Game {
     if (!this.canControl(transport)) return false;
     const cargo = transport.loaded[cargoIndex];
     if (!cargo) return false;
-    if (!this.unloadTargets(transport, cargoIndex).some(t => t.x === x && t.y === y)) return false;
+    if (this.map.getUnitAt(x, y)
+      || !this.unloadTargets(transport, cargoIndex).some(t => t.x === x && t.y === y)) return false;
 
     transport.unloadUnit(cargo, { x, y });
     transport.hasMoved = true;

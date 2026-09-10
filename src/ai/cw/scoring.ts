@@ -1,3 +1,4 @@
+import { isKnownBuilding, visibleUnitAt } from './visibility.ts';
 import { GameEnums, MAX_UNIT_HP, type BuildingHost, type Unit } from '../../host/index.ts';
 import { getCircle } from '../../host/globals.ts';
 import { calcFundsDamage, type BattleResult } from './damage.ts';
@@ -6,7 +7,7 @@ import type { CoreAI } from './coreai.ts';
 import type { InfluenceFrontMap } from './influencefrontmap.ts';
 import type { MoveUnitData } from './unitdata.ts';
 import type { DamageData, MoveTargetField, TargetScoringOptions } from './targets.ts';
-import { getAttackTargets } from './targets.ts';
+import { getAttackTargetsFast } from './targets.ts';
 
 /** Everything the attack scoring reads beyond the CoreAI base. */
 export interface ScoringContext {
@@ -77,13 +78,14 @@ export function calculateCounterBuildingDamage(
   let counterDamage = 0;
   for (let pass = 0; pass < 2; pass++) {
     for (const building of enemyBuildings) {
+      if (!isKnownBuilding(building, ai.player)) continue;
       counterDamage += ai.predictor.calcBuildingDamage(ai.player, unit, newPosition, building);
     }
   }
   for (const offset of getCircle(1, 2)) {
     const x = newPosition.x + offset.x, y = newPosition.y + offset.y;
     if (!ai.map.onMap(x, y)) continue;
-    const mine = ai.map.getTerrain(x, y).getUnit();
+    const mine = visibleUnitAt(ai.map, ai.player, x, y);
     if (mine !== null && !mine.isStealthed(ai.player) && mine.getUnitID() === 'WATERMINE') {
       counterDamage += ai.config.watermineDamage;
     }
@@ -136,7 +138,8 @@ export function calculateCounterDamage(
   const { ai, ownUnits, enemyUnits } = context;
   const { config } = ai;
   const unit = curUnitData.unit;
-  // Cached per unit *type*: two identical tanks threaten a tile identically.
+  // Upstream caches normalized damage per unit type in a qint32, truncating
+  // before scaling it to another unit's HP.
   const unitDamageData = new Map<string, number>();
   let counterDamage = 0;
 
@@ -145,7 +148,7 @@ export function calculateCounterDamage(
 
   for (const enemyData of enemyUnits) {
     const nextEnemy = enemyData.unit;
-    if (nextEnemy.getHp() <= 0 || nextEnemy.getTerrain() === null) continue;
+    if (nextEnemy.isStealthed(ai.player) || nextEnemy.getHp() <= 0 || nextEnemy.getTerrain() === null) continue;
     const enemyPos = { x: nextEnemy.getX(), y: nextEnemy.getY() };
     let distance = distanceTo(newPosition.x, newPosition.y, enemyPos.x, enemyPos.y);
     const maxFireRange = enemyData.maxFireRange;
@@ -177,7 +180,7 @@ export function calculateCounterDamage(
           nextEnemy, enemyDamage, enemyPos, unit, 0, newPosition,
           GameEnums.LuckDamageMode_Average, GameEnums.LuckDamageMode_Average, ignoreOutOfVisionRange);
         if (damageData.x >= 0) {
-          unitDamageData.set(nextEnemy.getUnitID(), damageData.x * MAX_UNIT_HP / nextEnemy.getHp());
+          unitDamageData.set(nextEnemy.getUnitID(), Math.trunc(damageData.x * MAX_UNIT_HP / nextEnemy.getHp()));
         }
       }
       if (damageData.x >= config.notAttackableDamage) {
@@ -190,11 +193,12 @@ export function calculateCounterDamage(
       }
     } else if (canMoveAndFire) {
       const targets = enemyData.range === null ? [] : [...enemyData.range.tiles.values()]
-        .filter(tile => tile.cost <= enemyData.movementPoints + 1);
+        // C++ getAllNodePointsFast(movementPoints + 1) has an exclusive bound.
+        .filter(tile => tile.cost <= enemyData.movementPoints);
       let found = false;
       for (const target of targets) {
         distance = distanceTo(newPosition.x, newPosition.y, target.x, target.y);
-        const terrainUnit = ai.map.getTerrain(target.x, target.y).getUnit();
+        const terrainUnit = visibleUnitAt(ai.map, ai.player, target.x, target.y);
         if (distance < minFireRange || distance > maxFireRange) continue;
         if (terrainUnit !== null && terrainUnit !== nextEnemy) continue;
         if (hasDamage) {
@@ -204,7 +208,7 @@ export function calculateCounterDamage(
             nextEnemy, enemyDamage, target, unit, 0, newPosition,
             GameEnums.LuckDamageMode_Average, GameEnums.LuckDamageMode_Average, ignoreOutOfVisionRange);
           if (damageData.x >= 0) {
-            unitDamageData.set(nextEnemy.getUnitID(), damageData.x * MAX_UNIT_HP / nextEnemy.getHp());
+            unitDamageData.set(nextEnemy.getUnitID(), Math.trunc(damageData.x * MAX_UNIT_HP / nextEnemy.getHp()));
           }
         }
         found = true;
@@ -217,7 +221,7 @@ export function calculateCounterDamage(
           for (const target of targets) {
             const nextUnit = otherData.unit;
             distance = distanceTo(nextUnit.getX(), nextUnit.getY(), target.x, target.y);
-            const targetUnit = ai.map.getTerrain(target.x, target.y).getUnit();
+            const targetUnit = visibleUnitAt(ai.map, ai.player, target.x, target.y);
             if (distance < minFireRange || distance > maxFireRange) continue;
             if (targetUnit !== null && !targetUnit.getOwner().isAlly(ai.player)) continue;
             if (enemyIsland !== ai.islandMaps[enemyIslandIdx].getIsland(target.x, target.y)) continue;
@@ -254,10 +258,10 @@ function discount(damage: number, ownCosts: number, otherCosts: number): number 
 export function getOwnSupportDamage(
   context: ScoringContext, unit: Unit, moveTarget: { x: number; y: number }, enemy: Unit | null,
 ): { supportDamage: number; hpDamage: number } {
-  const { ai, ownUnits, targetOptions } = context;
+  const { ai, ownUnits } = context;
   const { config } = ai;
   let supportDamage = 0, hpDamage = 0;
-  if (enemy === null) return { supportDamage, hpDamage };
+  if (enemy === null || enemy.isStealthed(ai.player)) return { supportDamage, hpDamage };
 
   for (const data of ownUnits) {
     if (data.unit === unit || data.unit.getHasMoved() || !data.unit.hasWeapons()) continue;
@@ -266,14 +270,14 @@ export function getOwnSupportDamage(
     const distance = Math.abs(moveTarget.x - position.x) + Math.abs(moveTarget.y - position.y);
     if (distance > data.movementPoints) continue;
 
-    const { targets } = getAttackTargets(
-      ai.game, ai.predictor, data.unit, data.range, targetOptions);
+    const targets = getAttackTargetsFast(
+      ai.game, ai.predictor, data.unit, data.range, config.ownUnitValue, data.minFireRange, data.maxFireRange);
     const minFundsDamage = -data.unit.getCoUnitValue() * config.minAttackFunds;
     const usedUnits: Unit[] = [];
     let newFundsDamage = -Infinity, newHpDamage = -Infinity;
 
     for (const damageData of targets) {
-      const newEnemy = ai.map.getTerrain(damageData.x, damageData.y).getUnit();
+      const newEnemy = visibleUnitAt(ai.map, ai.player, damageData.x, damageData.y);
       const sameTile = moveTarget.x === damageData.x && moveTarget.y === damageData.y;
       if (newEnemy === enemy && !sameTile && newEnemy !== null) {
         const newHp = enemy.getHp() - damageData.hpDamage;
@@ -301,7 +305,7 @@ export function getOwnSupportDamage(
  * to actually make, or -1 for none worth making.
  *
  * Ties break on terrain defence, so given two equal trades the unit takes the
- * one that leaves it standing somewhere better.
+ * one on the defender tile with greater terrain defence, as upstream does.
  */
 export function getBestAttackTarget(
   context: ScoringContext, unitData: MoveUnitData,
@@ -311,13 +315,15 @@ export function getBestAttackTarget(
   const { ai } = context;
   const { config } = ai;
   const unit = unitData.unit;
-  let best = -1, currentDamage = -Number.MAX_SAFE_INTEGER, defense = 0;
+  let best = -1, currentDamage = -2_147_483_648, defense = 0;
   const minFundsDamage = -unitData.unitCosts * config.minAttackFunds;
 
   for (let i = 0; i < targets.length; i++) {
     const moveTarget = { x: moveTargetFields[i].x, y: moveTargetFields[i].y };
-    const enemy = ai.map.getTerrain(targets[i].x, targets[i].y).getUnit();
+    const enemy = visibleUnitAt(ai.map, ai.player, targets[i].x, targets[i].y);
     const minFireRange = unit.getMinRange(moveTarget);
+    // Upstream fundsDamage is qint32; compound operations truncate each time,
+    // before threshold comparisons and the terrain-defence tie break.
     let fundsDamage = 0, bonusDamage = 0;
 
     if (enemy !== null) {
@@ -328,21 +334,21 @@ export function getBestAttackTarget(
         // The support scan asks what the board looks like after this attack.
         enemy.setVirtualHpValue(newHp);
         const support = getOwnSupportDamage(context, unit, moveTarget, enemy);
-        fundsDamage += support.supportDamage;
+        fundsDamage = Math.trunc(fundsDamage + support.supportDamage);
         bonusDamage = support.hpDamage;
         enemy.setVirtualHpValue(0);
       }
-      if (minFireRange > 1) fundsDamage *= config.ownIndirectAttackValue;
-      if (newHp <= 0) fundsDamage *= config.enemyKillBonus;
+      if (minFireRange > 1) fundsDamage = Math.trunc(fundsDamage * config.ownIndirectAttackValue);
+      if (newHp <= 0) fundsDamage = Math.trunc(fundsDamage * config.enemyKillBonus);
       if (enemy.getMinRange({ x: enemy.getX(), y: enemy.getY() }) > 1) {
-        fundsDamage *= config.enemyIndirectBonus;
+        fundsDamage = Math.trunc(fundsDamage * config.enemyIndirectBonus);
       }
       if (unitData.range !== null
         && !ai.isMoveableTile(ai.map.getTerrain(moveTarget.x, moveTarget.y).getBuilding(), unitData.range)) {
-        fundsDamage -= config.ownProdctionMalus;
+        fundsDamage = Math.trunc(fundsDamage - config.ownProdctionMalus);
       }
     } else {
-      fundsDamage = targets[i].fundsDamage;
+      fundsDamage = Math.trunc(targets[i].fundsDamage);
     }
 
     let counterDamage = calculateCounterDamage(
@@ -350,7 +356,7 @@ export function getBestAttackTarget(
       buildings, enemyBuildings, true);
     const stillThere = unitData.range?.tiles.has(`${unit.getX()},${unit.getY()}`) ?? false;
     if (counterDamage < 0 || !stillThere) counterDamage = 0;
-    fundsDamage -= counterDamage;
+    fundsDamage = Math.trunc(fundsDamage - counterDamage);
 
     const targetDefense = ai.map.getTerrain(targets[i].x, targets[i].y).getDefense(unit);
     if (fundsDamage < minFundsDamage) continue;

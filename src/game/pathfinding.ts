@@ -1,4 +1,4 @@
-import type { GameMap, Unit } from '../host/index.ts';
+import type { GameMap, Player, Unit } from '../host/index.ts';
 import { BucketQueue, assertIntegerCost } from './bucketqueue.ts';
 
 /**
@@ -60,6 +60,8 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number]> = [
  * plain "where can this unit go this turn" question every existing caller asks.
  */
 export interface MovementOptions {
+  /** AI threat forecasts use the observing player's information, not the enemy's. */
+  visibilityPlayer?: Player;
   /**
    * Overrides the unit's own movement points.
    *
@@ -82,6 +84,7 @@ export function computeMovementRange(
 ): MovementRange {
   const budget = options.budget ?? unit.getMovementpoints();
   const ignoreEnemies = options.ignoreEnemies ?? 'off';
+  const visibilityPlayer = options.visibilityPlayer ?? unit.getOwner();
   const width = map.width;
 
   // Flat arrays during the search; the string-keyed Maps are built once at the
@@ -115,13 +118,13 @@ export function computeMovementRange(
       const y = cy + dy;
       if (!map.onMap(x, y)) continue;
 
-      const occupant = map.getUnitAt(x, y);
+      const actualOccupant = map.getUnitAt(x, y);
+      const occupant = actualOccupant && !actualOccupant.isStealthed(visibilityPlayer) ? actualOccupant : null;
       if (occupant && occupant !== unit) {
         // Enemies block; allies may be passed through but not stopped on.
         // An enemy the mover cannot see does NOT block — otherwise the movement
         // overlay silently reveals exactly where every hidden unit is standing.
         const blocks = unit.getOwner().isEnemyUnit(occupant)
-          && !occupant.isStealthed(unit.getOwner())
           && !unit.getIgnoreUnitCollision()
           && (ignoreEnemies === 'off'
             || (ignoreEnemies === 'onlyNotMoved' && !occupant.getHasMoved()));
@@ -143,8 +146,7 @@ export function computeMovementRange(
       cost[at] = next;
       cameFrom[at] = index;
       // Do not disclose a hidden enemy through a hole in the movement overlay.
-      canStop[at] = occupant === null || occupant === unit
-        || occupant.isStealthed(unit.getOwner()) ? 1 : 0;
+      canStop[at] = occupant === null || occupant === unit ? 1 : 0;
       frontier.push(at, next);
     }
   }

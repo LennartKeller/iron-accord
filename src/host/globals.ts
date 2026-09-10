@@ -59,15 +59,17 @@ export function makeGlobals(rng: Rng) {
      */
     getShotFields: (min: number, max: number, xDirection = 0, yDirection = 0) => {
       const points: QPoint[] = [];
-      for (let x = -max; x <= max; x++) {
-        for (let y = -max; y <= max; y++) {
-          const distance = Math.abs(x) + Math.abs(y);
-          if (distance < min || distance > max) continue;
-          if (xDirection > 0 && x < 0) continue;
-          if (xDirection < 0 && x > 0) continue;
-          if (yDirection > 0 && y < 0) continue;
-          if (yDirection < 0 && y > 0) continue;
-          points.push({ x, y });
+      // Each distance adds a wider row/column; this is a cone, not a diamond.
+      for (let distance = min; distance <= max; distance++) {
+        if (xDirection !== 0) {
+          for (let y = -distance + 1; y < distance; y++) {
+            points.push({ x: Math.sign(xDirection) * distance, y });
+          }
+        }
+        if (yDirection !== 0) {
+          for (let x = -distance + 1; x < distance; x++) {
+            points.push({ x, y: Math.sign(yDirection) * distance });
+          }
         }
       }
       return new PointVector(points);

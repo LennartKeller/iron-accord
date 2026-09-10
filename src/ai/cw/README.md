@@ -1,7 +1,44 @@
 # Commander Wars' NormalAi, ported
 
-A TypeScript transcription of the C++ opponent that ships with Commander Wars
+A partial TypeScript port of the C++ opponent that ships with Commander Wars
 (`ext/Commander_Wars/ai/`), running against iron-accord's host objects.
+
+## Fidelity status (2026-09-10)
+
+The [source audit](../../../docs/cw-ai-fidelity-audit-2026-09-10.md) found substantial
+behavioral differences. The first repair pass fixes enemy movement ranges/influence,
+transport-stage ordering and restart, transport distance classification, and the
+extra movement point in retaliation/safety checks. Destination-aware, multi-passenger
+unloads are covered by full-turn tests.
+
+The second pass restores funds-based post-movement attacks, upstream fast support
+estimates, projected enemy damage and integer score boundaries. Production now runs
+the generated, syntax-repaired upstream JavaScript policy through host adapters,
+including funds/day phases, reactive queues and topology-dependent composition.
+
+The third pass restores directional island relabeling, cannon danger routing,
+flare/Oozium/black-bomb stages, movement follow-up actions, building actions and
+silo-value refresh after each committed action. Tests execute these actions through
+the game engine, including resupply, construction, stealth and mine placement.
+
+This is still **not a verified end-to-end NormalAi equivalent**. Training mutation,
+native random streams, traversal/tie behavior, precision and unsupported host inputs
+remain different. Visibility rules intentionally prevent native hidden-unit peeking.
+No native Qt/C++ differential run has been completed. The audit separates historical
+findings, implemented repairs and remaining exceptions.
+
+## Information and execution safeguards
+
+Ordinary decisions now share the visibility checks used by special actions. Enemy
+caches, threat forecasts, firing positions and transport routes use what the AI
+player can see. Shrouded structures and private enemy cargo do not supply strategic
+inputs. Buildings under ordinary fog remain public, as they are in the game UI.
+Paired-board tests change hidden units or factories and verify that the covered
+visible positions produce the same action.
+
+Planning uses apparent occupancy; execution still checks actual collisions and
+rejects blocked production. The production mobility probe never installs a dummy
+unit on the board. These are deliberate safeguards, not native parity claims.
 
 ## Why port rather than run it
 
@@ -22,7 +59,8 @@ Two payoffs, and the second is the one the evidence actually supports.
 
 1. **A benchmark opponent.** Our agents have only ever been measured against
    each other and against a greedy baseline, so "0.867 vs greedy" has no outside
-   referent. NormalAi is a fixed, externally-authored standard.
+   referent. The intended benchmark is upstream NormalAi; the current port still needs the
+   fidelity repairs described in the audit before it can represent that standard.
 
 2. **A different data distribution.** Expert iteration failed here (see
    `docs/handoff-value-net.md`): strength fell monotonically with the share of
@@ -36,14 +74,17 @@ Two payoffs, and the second is the one the evidence actually supports.
 ## What is deliberately left out
 
 - **COs.** They are absent from iron-accord by design, so `useCOPower` and
-  `buildCOUnit` are inert and `Player.getMaxCoCount()` returns 0. The branches
-  are kept rather than deleted so the ported control flow still reads 1:1
-  against the C++.
-- **Oozium, flares, black bombs.** Black Hole / CO-campaign units our maps do
-  not carry. Stubbed to no-ops; if a map ever fields one, the AI ignores it
-  rather than misplaying it.
+  `buildCOUnit` are inert and `Player.getMaxCoCount()` returns 0. Those action stages are omitted from the current TypeScript ladder.
 - **`UnitPathFindingSystem`.** We already have a faster bucket-queue Dijkstra in
   `src/game/pathfinding.ts`. Ported call sites go through that instead.
+- **Raw map filter flags.** They are not retained by the host. Production's map
+  flag adapter returns false; it still evaluates actual island and factory topology.
+- **Map-authored predefined AI modes.** The separate `coreai_predefinedai.cpp`
+  orders are not implemented by this NormalAi adapter.
+- **Hidden-unit peeking.** Flare selection scores unrevealed area rather than
+  unseen enemy positions. Bomb value and Oozium pursuit use visible enemies.
+  These choices preserve the player's information boundary rather than reproducing
+  the native AI's access to hidden units.
 
 ## Layout
 
@@ -55,26 +96,34 @@ Two payoffs, and the second is the one the evidence actually supports.
 | `influencefrontmap.ts` | `ai/influencefrontmap.cpp`, minus the front lines |
 | `targetedpfs.ts` | `ai/targetedunitpathfindingsystem.cpp` + the A* in `coreengine/pathfindingsystem.cpp` |
 | `damage.ts` | `CoreAI::getBaseDamage` / `calcVirtuelUnitDamage` / `calcBuildingDamage` / `calcFundsDamage` |
-| `targets.ts` | `CoreAI::getAttackTargets` / `getBestTarget` / `isAttackOnTerrainAllowed` |
+| `targets.ts` | `CoreAI::getAttackTargets` / `getAttackTargetsFast` / `getBestAttacksFromField` / `getBestTarget` / `isAttackOnTerrainAllowed` |
 | `actions.ts` | the `ACTION_*` ids `CoreAI` names |
 | `coreai.ts` | `ai/coreai.cpp` -- island maps, predicates, the `append*Targets` family |
 | `transport.ts` | `CoreAI::doExtendedCircleAction` and the loading/unloading targets |
 | `unitdata.ts` | `MoveUnitData`, `createUnitData`, `sortUnitsFarFromEnemyFirst` |
 | `scoring.ts` | `calculateCounterDamage` / `getOwnSupportDamage` / `getBestAttackTarget` |
 | `movement.ts` | `getClosestReachableMovePath` / `getMoveTargetField` / `moveToSafety` |
+| `movement-actions.ts` | movement follow-ups in `NormalAi::moveUnit`: support/build, stealth, safe surfacing and placement |
+| `special-actions.ts` | `CoreAI::moveFlares`, `moveOoziums`, `moveBlackBombs`, with visibility-safe scoring |
+| `building-actions.ts` | `CoreAI::useBuilding` and field/menu action selection |
 | `normalai.ts` | `NormalAi`'s step ladder, as an `Agent` |
 | `groups.ts` | generated from `__coreai.js`'s build-group tables |
-| `production.ts` | `ai/productionSystem/simpleproductionsystem.cpp` |
+| `production.ts` | `ai/productionSystem/simpleproductionsystem.cpp` and production callback integration |
+| `production-policy.ts` | generated, syntax-repaired `resources/aidata/normal/__coreai.js` |
+| `production-context.ts` | host adapters for the generated production callbacks |
 
-Every rung of `performActionSteps` is ported except the CO and Black Hole
-branches that do not apply here: `buildCOUnit`, `moveFlares`, `moveOoziums` and
-`moveBlackBombs`. What runs is capture, join-capture, support, fire (indirect
-then direct), repair, refill, move, move-indirects, support again, load, ferry,
-clear-production and build.
+Implementations exist for capture, join-capture, support, fire, repair, refill,
+movement, loading, ferrying, special units, building actions, production clearing
+and production. Loading and ferrying run before late support, followed by the
+upstream-style retry of unspent units. Movement tries an HP-gated shot, support/build
+or stealth/placement, then a second shot without the HP gate, then capture/wait.
+The second shot still requires the funds-trade floor. See the audit for exceptions.
 
-Regenerate the config after updating `ext/` with:
+Regenerate the AI data and production policy after updating `ext/` with:
 
     python3 tools/gen_cw_ai_config.py
+    python3 tools/gen_cw_ai_groups.py
+    python3 tools/gen_cw_production_policy.py
 
 ## Two upstream quirks the generator preserves
 
@@ -94,9 +143,9 @@ knobs -- `DirectIndirectRatio` and `MinMovementDamage` among them.
 
 `CoreAI::calcVirtuelUnitDamage` forwards to the `ACTION_FIRE` script's
 `calcBattleDamage3`, and that script is one we already run unmodified. So
-`damage.ts` calls it directly: the number the AI scores a move on is produced by
-the same function that will resolve the attack, and the two cannot drift apart.
-Only the caching and the funds scoring around it are ported.
+`damage.ts` calls it directly. This preserves the script formula, but fidelity
+still depends on the host objects, arguments, target enumeration and surrounding
+scoring. Delegating the formula alone does not guarantee decision parity.
 
 ## Landmines carried over deliberately
 
@@ -106,10 +155,13 @@ yields infinity, and that infinity is added straight to a counter-damage score.
 This is reachable: `increaseInfluence` takes a `qint32`, so a fractional
 contribution truncates to zero on tiles far from anything the AI owns.
 
-JavaScript numbers are IEEE doubles like the C++ floats, so a literal
-transcription reproduces upstream exactly, infinity included -- no deviation is
-needed to stay faithful, and none is made. If the ported AI turns out to refuse
-to leave its own territory, this is the first place to look.
+Both implementations can produce infinity here. JavaScript numbers use double
+precision, whereas upstream also uses single-precision floats and integer scores;
+its truncation points must be reproduced separately. Attack ranking now truncates
+each compound score operation, and retaliation truncates normalized cached damage.
+This does not emulate all single-precision arithmetic or undefined integer overflow.
+If the port refuses to leave its own territory, the influence division remains a
+place to investigate.
 
 ## Front lines are not ported
 
@@ -169,14 +221,19 @@ One character fixes it (`=` to `:`). Two consequences for this port:
 
 - `HIGH_PRIO_BUILDINGS` in `normalai.ts` is hard-coded to `["FACTORY"]`, which
   is what the script would have returned.
-- `SimpleProductionSystem`'s *algorithm* is ported (`production.ts`), but the
-  JS layer that configures it is not run. Building a bridge for a file that does
-  not parse buys nothing, so `tools/gen_cw_ai_groups.py` applies the repair in
-  memory, evaluates the file with Node and emits the group tables as
-  `groups.ts`. The configuration path around them reduces cleanly without COs:
-  every CO modifier is 1 and the direct/indirect ratio modifier is 1, leaving
-  each group's own distribution scaled only by the ground/air/naval balance.
+- `production.ts` ports the C++ purchase machinery. The configuration callbacks
+  now execute the generated `production-policy.ts`, emitted by
+  `tools/gen_cw_production_policy.py` with that same syntax repair. This restores
+  the source's policy instead of maintaining a separate approximation of it.
+  `production-context.ts` provides its no-CO host interfaces; absent raw map flags
+  are false, and enemy information is filtered through the host visibility rules.
   `ext/` is never modified.
+
+Special factory menus also preserve the pinned policy's negative-cost ceiling:
+ordinary positive-cost choices fall back to a random enabled menu item. The Black
+Hole factory construction-list script can fail on its nullable `getCOSpecificUnit`
+callback; the host returns an empty list as the native script-result conversion
+does, while independent door menus remain usable.
 
 ## Determinism
 
@@ -186,6 +243,11 @@ That rng instance is the one wired into the script globals, so a *different*
 `Mulberry32` leaves the scripts on the shared stream and combat luck carries over
 between episodes -- four runs of one seed then differ. Every tool under `tools/`
 already does this correctly.
+
+Reproducibility inside this host does not imply native random-stream parity.
+`randomizeConfig` still uses percentage nudges and different clamp/bound handling
+from C++ `randomizeIni`; the production-policy repairs do not change that training
+mutation behavior. Default unmutated browser configuration is a separate case.
 
 ## Production is a composition, not a shopping list
 
@@ -201,6 +263,17 @@ infantry every turn and never reaches the rest of the distribution: the army
 comes out 21 infantry and nothing else. With it built once, the same match
 fields infantry, light and heavy tanks, artillery, a megatank and a neotank.
 
-Whether the air and naval groups apply is decided by what our factories can
-actually build, not by the map's filter flags -- the flags only exist on newer
-map versions, and "can I build a ship" is what the modifier is really asking.
+The generated upstream policy now chooses funds/day modes, reserves money for other
+factories, queues reactive counter/scout/transport/supply purchases and refreshes
+land/air/naval composition using the hosted topology information. Infantry and
+amphibious weights follow their own upstream rules instead of inheriting the tank
+ground multiplier. Captured production buildings can activate already configured
+groups. Factory checks include relative island size and a danger-avoiding attempt
+before the upstream always-build fallback.
+
+Autosaves retain policy variables, preparation turn, purchase count, pending queues
+and distributions. The port deliberately keeps correct price-to-unit associations,
+visible-enemy filtering and the guard against buying a unit that cannot leave its
+factory. These are explicit exceptions to literal upstream behavior. No-CO adapters,
+missing raw map flags and native RNG/tie/precision behavior still
+limit equivalence even though the policy script itself comes from the pinned source.

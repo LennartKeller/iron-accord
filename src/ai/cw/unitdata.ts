@@ -1,4 +1,4 @@
-import type { Unit } from '../../host/index.ts';
+import type { Player, Unit } from '../../host/index.ts';
 import type { MovementRange } from '../../game/pathfinding.ts';
 import { computeMovementRange } from '../../game/pathfinding.ts';
 import { CwAction } from './actions.ts';
@@ -35,7 +35,7 @@ export interface MoveUnitData {
  */
 export function createUnitData(
   unit: Unit, enemy: boolean, moveMultiplier: number,
-  otherUnitData: readonly MoveUnitData[], aiFunctionStep: number, always = false,
+  otherUnitData: readonly MoveUnitData[], aiFunctionStep: number, always = false, visibilityPlayer?: Player,
 ): MoveUnitData {
   const position = { x: unit.getX(), y: unit.getY() };
   const data: MoveUnitData = {
@@ -72,6 +72,7 @@ export function createUnitData(
     : moveMultiplier * data.movementPoints;
   data.range = computeMovementRange(unit.map, unit, {
     budget: Math.floor(budget),
+    visibilityPlayer,
     ignoreEnemies: enemy ? 'onlyNotMoved' : 'off',
   });
   return data;

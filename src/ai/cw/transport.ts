@@ -3,6 +3,7 @@ import type { BuildingHost, Unit } from '../../host/index.ts';
 import { CwAction } from './actions.ts';
 import type { CoreAI } from './coreai.ts';
 import type { MoveTargetField } from './targets.ts';
+import { visibleUnitAt } from './visibility.ts';
 
 // Plain objects rather than enums: the self-play workers run under node's
 // strip-only TypeScript, which cannot compile enums, and this file is on their
@@ -13,7 +14,7 @@ export const CircleResult = { Stop: 0, Fail: 1, Success: 2 } as const;
 export type CircleResult = typeof CircleResult[keyof typeof CircleResult];
 
 /** ai/coreai.h: CoreAI::TargetDistance, ordered as the C++ enum is. */
-export const TargetDistance = { CloseTarget: 0, FarTarget: 1, NoTarget: 2 } as const;
+export const TargetDistance = { NoTarget: 0, FarTarget: 1, CloseTarget: 2 } as const;
 export type TargetDistance = typeof TargetDistance[keyof typeof TargetDistance];
 
 /** Tiles adjacent to a point -- where cargo can step off a transport. */
@@ -101,7 +102,7 @@ export function checkIslandForUnloading(
   while (result === CircleResult.Fail) {
     result = doExtendedCircleAction(startX, startY, islandX, islandY, min, max, (x, y) => {
       if (!ai.map.onMap(x, y)) return CircleResult.Stop;
-      const fieldUnit = ai.map.getTerrain(x, y).getUnit();
+      const fieldUnit = visibleUnitAt(ai.map, ai.player, x, y);
       if (ai.islandMaps[loadedUnitIslandIdx].getIsland(x, y) !== targetIsland) {
         return CircleResult.Stop;
       }
@@ -114,7 +115,7 @@ export function checkIslandForUnloading(
       for (const offset of UNLOAD_AREA) {
         const ux = x + offset.x, uy = y + offset.y;
         if (!ai.map.onMap(ux, uy)) continue;
-        if (ai.map.getTerrain(ux, uy).getUnit() !== null) continue;
+        if (visibleUnitAt(ai.map, ai.player, ux, uy) !== null) continue;
         if (loadedUnit.getBaseMovementCosts(ux, uy, ux, uy) <= 0) continue;
         targets.push({ x, y, z: distanceModifier });
         return CircleResult.Fail;
@@ -144,6 +145,7 @@ export function canTransportToEnemy(
   const targets: MoveTargetField[] = [];
 
   for (const enemy of enemyUnits) {
+    if (enemy.isStealthed(ai.player)) continue;
     const x = enemy.getX(), y = enemy.getY();
     const targetIsland = ai.islandMaps[loadedUnitIslandIdx].getIsland(x, y);
     if (targetIsland < 0 || checkedIslands.includes(targetIsland)) continue;
@@ -189,6 +191,7 @@ export function appendNearestUnloadTargets(
   const captureUnits = loaded.filter(cargo => cargo.getActionList().includes(CwAction.CAPTURE));
 
   for (const enemy of enemyUnits) {
+    if (enemy.isStealthed(ai.player)) continue;
     for (let i = 0; i < loaded.length; i++) {
       // Upstream keys the checked set on the TRANSPORT's movement type here,
       // not the cargo's, so two different passengers share one bookkeeping
@@ -244,6 +247,7 @@ export function appendUnloadTargetsForAttacking(
   const range = getCircle(1, averageMovepoints * rangeMultiplier + 1);
 
   for (const enemy of enemyUnits) {
+    if (enemy.isStealthed(ai.player)) continue;
     const enemyX = enemy.getX(), enemyY = enemy.getY();
     const attackers = attackUnits.filter(
       cargo => ai.predictor.getBaseDamage(cargo, enemy) > 0);
@@ -254,7 +258,7 @@ export function appendUnloadTargetsForAttacking(
         const x = enemyX + rangePos.x + unloadPos.x;
         const y = enemyY + rangePos.y + unloadPos.y;
         if (!ai.map.onMap(x, y)) continue;
-        if (ai.map.getTerrain(x, y).getUnit() !== null) continue;
+        if (visibleUnitAt(ai.map, ai.player, x, y) !== null) continue;
         if (contains(targets, x, y, distanceModifier)) continue;
         if (!ai.isUnloadTerrain(unit, ai.map.getTerrain(x, y))) continue;
         if (ai.islandMaps[unitIslandIdx].getIsland(x, y) !== unitIsland) continue;
@@ -299,7 +303,7 @@ export function appendUnloadTargetsForCapturing(
     const px = building.getX(), py = building.getY();
     if (!captureUnits[0].canMoveOver(px, py)) continue;
     if (!building.isCaptureOrMissileBuilding(ai.missileTarget)) continue;
-    if (building.getTerrain()?.getUnit() != null) continue;
+    if (visibleUnitAt(ai.map, ai.player, px, py) !== null) continue;
 
     const islandIdx = ai.islandMaps[island].getIsland(px, py);
     let finalDistanceModifier = distanceModifier;
@@ -319,7 +323,7 @@ export function appendUnloadTargetsForCapturing(
     for (const offset of UNLOAD_AREA) {
       const x = px + offset.x, y = py + offset.y;
       if (!ai.map.onMap(x, y)) continue;
-      if (ai.map.getTerrain(x, y).getUnit() !== null) continue;
+      if (visibleUnitAt(ai.map, ai.player, x, y) !== null) continue;
       if (contains(targets, x, y, finalDistanceModifier)) continue;
       if (!ai.isUnloadTerrain(unit, ai.map.getTerrain(x, y))) continue;
       if (ai.islandMaps[unitIslandIdx].getIsland(x, y) !== unitIsland) continue;
@@ -397,7 +401,7 @@ export function appendCaptureTransporterTargets(
       const x = building.getX(), y = building.getY();
       return ai.islandMaps[unitIslandIdx].getIsland(x, y) === unitIsland
         && ai.islandMaps[transporterIslandIdx].getIsland(x, y) === transporterIsland
-        && ai.map.getTerrain(x, y).getUnit() === null
+        && visibleUnitAt(ai.map, ai.player, x, y) === null
         && building.isCaptureOrMissileBuilding(ai.missileTarget);
     });
     if (good) {
@@ -422,11 +426,12 @@ export function appendSupportTargets(
     const places = action.startsWith(CwAction.PLACE);
     if (!supports && !places) continue;
     for (const other of supports ? units : enemyUnits) {
+      if (!supports && other.isStealthed(ai.player)) continue;
       if (supports && other === currentUnit) continue;
       for (const field of ring) {
         const x = other.getX() + field.x, y = other.getY() + field.y;
         if (!ai.map.onMap(x, y)) continue;
-        if (ai.map.getTerrain(x, y).getUnit() !== null) continue;
+        if (visibleUnitAt(ai.map, ai.player, x, y) !== null) continue;
         if (contains(targets, x, y, 1 + distanceModifier)) continue;
         targets.push({ x, y, z: 1 + distanceModifier });
       }
@@ -488,7 +493,7 @@ export function appendLoadingTargets(
         currentPos.x, currentPos.y, loadingUnit.getX(), loadingUnit.getY(), min, max, (x, y) => {
           if (!ai.map.onMap(x, y)) return CircleResult.Stop;
           if (ai.islandMaps[loadingIslandIdx].getIsland(x, y) !== loadingIsland) return CircleResult.Stop;
-          const fieldUnit = ai.map.getTerrain(x, y).getUnit();
+          const fieldUnit = visibleUnitAt(ai.map, ai.player, x, y);
           if (ai.islandMaps[unitIslandIdx].getIsland(x, y) === unitIsland
             && (fieldUnit === null || fieldUnit === unit)
             && ai.isLoadingTerrain(unit, ai.map.getTerrain(x, y))) {

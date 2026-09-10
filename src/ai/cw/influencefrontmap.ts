@@ -1,3 +1,4 @@
+import { isKnownBuilding } from './visibility.ts';
 import type { GameMap, Player, Unit } from '../../host/index.ts';
 import type { MovementRange } from '../../game/pathfinding.ts';
 import type { IslandMap } from './islandmap.ts';
@@ -167,17 +168,15 @@ export class InfluenceFrontMap {
    * everywhere on a mixed map.
    */
   addBuildingInfluence(): void {
-    const income: number[] = [];
-    for (let i = 0; i < this.map.getPlayerCount(); i++) {
-      income.push(this.map.getPlayer(i)!.calcIncome());
-    }
+    const income: number[] = new Array(this.map.getPlayerCount()).fill(0);
 
     const factories: Array<{ x: number; y: number; owner: number; buildList: string[] }> = [];
     for (let x = 0; x < this.width; x++) {
       for (let y = 0; y < this.height; y++) {
         const building = this.map.getTerrain(x, y).getBuilding();
         const buildingOwner = building?.getOwner();
-        if (!building || !buildingOwner) continue;
+        if (!building || !buildingOwner || (this.owner && !isKnownBuilding(building, this.owner))) continue;
+        income[buildingOwner.getPlayerID()] += Math.trunc(building.getIncome());
         if (!building.getActionList().includes('ACTION_BUILD_UNITS')) continue;
         factories.push({
           x, y,
@@ -220,7 +219,10 @@ export class InfluenceFrontMap {
    * they threaten nobody.
    */
   addUnitInfluence(unit: Unit, range: MovementRange, movePoints: number): void {
-    if (!unit.hasWeapons() && unit.getLoadedUnitCount() === 0) return;
+    if (this.owner && unit.isStealthed(this.owner)) return;
+    // A visible enemy transport does not reveal whether it carries troops.
+    const knownCargo = (!this.owner || this.owner.isAlly(unit.getOwner())) && unit.getLoadedUnitCount() > 0;
+    if (!unit.hasWeapons() && !knownCargo) return;
     const value = unit.getCoUnitValue();
     const owner = unit.getOwner().getPlayerID();
     for (const tile of range.tiles.values()) {

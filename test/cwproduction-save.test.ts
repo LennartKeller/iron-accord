@@ -32,8 +32,8 @@ describe('production persistence', () => {
     expect(resumed.ready).toBe(true);
     expect(resumed.saveState()).toEqual(saved);
     expect(saved.initialProduction).toEqual([{ unitIds: ['INFANTRY'], count: 5 }]);
-    // A fresh initialization now has different air/ground weights. Resume
-    // must preserve the historical distribution of the uninterrupted agent.
+    // A fresh initialization would restart the six opening purchases. Resume
+    // preserves the remaining queue and the uninterrupted distribution.
     const restarted = new ProductionSystem(() => 0.25);
     restarted.initialize(player, owned);
     expect(restarted.saveState()).not.toEqual(saved);

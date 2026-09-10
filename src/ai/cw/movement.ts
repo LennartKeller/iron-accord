@@ -7,6 +7,7 @@ import type { CoreAI } from './coreai.ts';
 import type { MoveUnitData } from './unitdata.ts';
 import { calculateCounterDamage, type ScoringContext } from './scoring.ts';
 import { hasCaptureTarget, TargetDistance } from './transport.ts';
+import { visibleUnitAt } from './visibility.ts';
 
 export type Point = { x: number; y: number };
 
@@ -22,7 +23,7 @@ function isCrossable(
   ai: CoreAI, unit: Unit, range: MovementRange,
   x: number, y: number, movementCosts: number, movepoints: number,
 ): boolean {
-  const nodeUnit = ai.map.getTerrain(x, y).getUnit();
+  const nodeUnit = visibleUnitAt(ai.map, ai.player, x, y);
   const blocked = nodeUnit !== null && !nodeUnit.isStealthed(ai.player)
     && unit.getOwner().isEnemyUnit(nodeUnit);
   if (!(nodeUnit === null || nodeUnit === unit || blocked)) return false;
@@ -103,7 +104,7 @@ export function getMoveTargetField(
   for (let i = 0; i <= last; i++) {
     const { x, y } = movePath[i];
     const terrain = ai.map.getTerrain(x, y);
-    const occupant = terrain.getUnit();
+    const occupant = visibleUnitAt(ai.map, ai.player, x, y);
     if (occupant !== null && occupant !== unitData.unit) continue;
     const costs = range.tiles.get(key(x, y))?.cost ?? -1;
     if (costs < 0 || costs > movePoints) continue;
@@ -142,9 +143,10 @@ export function moveToSafety(
   if (range === null) return { point, leastDamage, allEqual };
 
   for (const tile of range.tiles.values()) {
-    if (tile.cost > movePoints + 1) continue;
+    // C++ getAllNodePointsFast(movePoints + 1) uses an exclusive upper bound.
+    if (tile.cost > movePoints) continue;
     const { x, y } = tile;
-    if (ai.map.getTerrain(x, y).getUnit() !== null) continue;
+    if (visibleUnitAt(ai.map, ai.player, x, y) !== null) continue;
     if (unit.getMovementCosts(x, y, x, y) <= 0) continue;
 
     let currentDamage = calculateCounterDamage(
@@ -193,6 +195,7 @@ export function hasTargets(
     || Math.abs(x - unitPos.x) + Math.abs(y - unitPos.y) <= minMovementDistance;
 
   for (const enemy of enemyUnits) {
+    if (enemy.isStealthed(ai.player)) continue;
     const x = enemy.getX(), y = enemy.getY();
     if (!near(x, y)) continue;
     if (islands.getIsland(x, y) === loadingIsland && loadingUnit.isAttackable(enemy, true)) {
@@ -251,7 +254,7 @@ export function appendTerrainBuildingAttackTargets(
       for (const attackPos of attackPositions) {
         const x = offset.x + attackPos.x, y = offset.y + attackPos.y;
         if (!ai.map.onMap(x, y)) continue;
-        if (ai.map.getTerrain(x, y).getUnit() !== null) continue;
+        if (visibleUnitAt(ai.map, ai.player, x, y) !== null) continue;
         if (!unit.canMoveOver(x, y)) continue;
         const candidate = { x, y, z: 1 + distanceModifier };
         if (!targets.some(t => t.x === x && t.y === y && t.z === candidate.z)) {

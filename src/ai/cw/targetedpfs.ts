@@ -1,4 +1,5 @@
 import type { GameMap, Unit } from '../../host/index.ts';
+import { visibleUnitAt } from './visibility.ts';
 
 /**
  * One place worth going, and how much the AI wants to go there.
@@ -127,7 +128,7 @@ export class TargetedUnitPathFindingSystem {
   private stepCost(x: number, y: number, curX: number, curY: number): number {
     if (!this.map.onMap(x, y)) return -1;
     if (x === curX && y === curY) return this.unit.getMovementCosts(x, y, x, y);
-    const occupant = this.map.getTerrain(x, y).getUnit();
+    const occupant = visibleUnitAt(this.map, this.unit.getOwner(), x, y);
     if (occupant !== null && occupant.getHp() > 0) {
       if (this.unit.getOwner().isEnemyUnit(occupant)
         && !occupant.isStealthed(this.unit.getOwner())
@@ -146,7 +147,7 @@ export class TargetedUnitPathFindingSystem {
   private nodeCost(x: number, y: number, curX: number, curY: number, currentCost: number): number {
     let costs = this.stepCost(x, y, curX, curY);
     if (costs < 0) return -1;
-    if (currentCost > this.unitMovepoints && this.map.getTerrain(x, y).getUnit() !== null) {
+    if (currentCost > this.unitMovepoints && visibleUnitAt(this.map, this.unit.getOwner(), x, y) !== null) {
       costs += BLOCK_COSTS;
     }
     if (this.moveCostMap !== null) costs += this.moveCostMap[this.indexOf(x, y)];
@@ -188,7 +189,7 @@ export class TargetedUnitPathFindingSystem {
       }
       this.finishNodes.push({ x, y, movementCost: movementCosts, multiplier: this.targets[index].z });
     }
-    const occupant = this.map.getTerrain(x, y).getUnit();
+    const occupant = visibleUnitAt(this.map, this.unit.getOwner(), x, y);
     if (occupant === null || this.unit.getIgnoreUnitCollision()
       || occupant.getOwner() === this.unit.getOwner()) {
       return this.finishInfo.target >= 0

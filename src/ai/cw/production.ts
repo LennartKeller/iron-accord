@@ -1,7 +1,13 @@
+import { apparentCanProduceAt } from './visibility.ts';
 import type { Game } from '../../game/game.ts';
 import type { ActionDescriptor } from '../actions.ts';
-import type { BuildingHost, Player, Unit } from '../../host/index.ts';
-import { BUILD_GROUPS, type BuildGroup } from './groups.ts';
+import { Unit, type BuildingHost, type Player } from '../../host/index.ts';
+import { ScriptVariables } from '../../host/variables.ts';
+import { computeMovementRange } from '../../game/pathfinding.ts';
+import type { CoreAI } from './coreai.ts';
+import { PRODUCTION_POLICY } from './production-policy.ts';
+import { createProductionContext } from './production-context.ts';
+import type { BuildGroup } from './groups.ts';
 
 /** ai/productionSystem: one group, with its live target share. */
 interface Distribution {
@@ -22,23 +28,12 @@ interface RankedDistribution {
 }
 
 /** ai/productionSystem: a batch the AI wants built regardless of the mix. */
-interface ForcedProduction { unitIds: string[] }
+interface ForcedProduction { unitIds: string[]; targetUids?: number[]; x?: number; y?: number }
 
 /**
- * ai/productionSystem/simpleproductionsystem.cpp, ported.
- *
- * The idea is a target composition rather than a shopping list: each group
- * (infantry, light tanks, air, naval...) has a share of the army it should
- * occupy, and every turn the AI buys from whichever group is furthest *below*
- * its share. That is what stops it spending an entire game on one unit type,
- * and it is the mechanism the piperunner stalemate was missing.
- *
- * The group tables come from `groups.ts`, generated from upstream's own
- * `__coreai.js`. The configuration path that would normally apply them lives in
- * that same file and cannot run -- see README.md -- so the no-CO reduction of it
- * is applied here directly: without COs every CO modifier is 1 and the
- * direct/indirect ratio modifier is 1, leaving the group's own distribution
- * scaled only by the ground/air/naval balance.
+ * C++ SimpleProductionSystem algorithms behind the actual pinned JS policy.
+ * Policy decisions run through production-policy.ts; these adapters provide
+ * queues, distributions, island suitability and threat-aware build execution.
  */
 export class ProductionSystem {
   private readonly buildDistribution = new Map<string, Distribution>();
@@ -47,67 +42,215 @@ export class ProductionSystem {
   private initialProduction: Array<{ unitIds: string[]; count: number }> = [];
   private forcedProduction: ForcedProduction[] = [];
   private initialised = false;
+  private readonly variables = new ScriptVariables();
+  private preparedForTurn = '';
+  private producedCount = 0;
+  private maxDamageCheckRange = 10;
+  private maxSingleDamage = 70;
 
   private readonly random: () => number;
 
   constructor(random: () => number) { this.random = random; }
 
-  /**
-   * ai/coreai.js: COREAI.initializeSimpleProductionSystem, reduced to the no-CO
-   * case, plus the ground/air/naval balance from getGroundModifier.
-   *
-   * Whether air and naval groups apply is decided by what our factories can
-   * actually build rather than by the map's filter flags: the flags only exist
-   * on newer map versions, and "can I build a ship" is the question the
-   * modifier is really asking.
-   */
-  initialize(player: Player, buildings: readonly BuildingHost[]): void {
-    this.buildDistribution.clear();
-    this.initialProduction = [{ unitIds: ['INFANTRY'], count: 6 }];
-    this.forcedProduction = [];
+  /** Run the actual pinned JS initialization with the no-CO host adapter. */
+  initialize(player: Player, _buildings: readonly BuildingHost[]): void {
+    if (this.initialised) return;
+    this.initializePolicy(player, true);
+  }
 
-    const buildable = new Set<string>();
+  private initializePolicy(player: Player, opening: boolean): void {
+    const ai = {
+      getPlayer: () => ({ getCO: () => null, getCoGroupModifier: () => 1 }),
+      getAiCoBuildRatioModifier: () => 1,
+      getUnitBuildValue: () => 1,
+    };
+    PRODUCTION_POLICY.initializeSimpleProductionSystem(this.scriptSystem(player), ai, player.map, [1, 1, 1, 1], opening);
+    this.initialised = true;
+  }
+
+  /** Common C++ production-system methods exposed to the generated JS policy. */
+  private scriptSystem(player: Player) {
+    return {
+      getVariables: () => this.variables,
+      getDummyUnit: (id: string) => ({ getBaseMinRange: () => this.dummy(player, id).minRange }),
+      addInitialProduction: (unitIds: string[], count: number) => this.initialProduction.push({ unitIds: [...unitIds], count }),
+      resetBuildDistribution: () => this.buildDistribution.clear(),
+      resetForcedProduction: () => { this.forcedProduction = []; },
+      addItemToBuildDistribution: (name: string, unitIds: string[], chance: number[], distribution: number,
+        buildMode: number, guardCondition: string, maxUnitDistribution: number) => this.addItemToBuildDistribution({
+          name, unitIds, chance: chance.map(Math.trunc), distribution, buildMode, guardCondition, maxUnitDistribution,
+        }, distribution),
+      addForcedProduction: (unitIds: string[], x = -1, y = -1) =>
+        this.forcedProduction.push({ unitIds: [...unitIds], x, y }),
+      addForcedProductionCloseToTargets: (unitIds: string[], targets: { items: Unit[] }) =>
+        this.forcedProduction.push({ unitIds: [...unitIds], targetUids: targets.items.map(unit => unit.uid) }),
+      setMaxDamageCheckRange: (range: number) => { this.maxDamageCheckRange = range; },
+      setMaxSingleDamage: (damage: number) => { this.maxSingleDamage = damage; },
+      getCurrentTurnProducedUnitsCounter: () => this.producedCount,
+    };
+  }
+
+  private dummy(player: Player, id: string): Unit {
+    const counter = player.map.getUnitUidCounter();
+    try { return new Unit(player.map, id, player, 0, 0); }
+    finally { player.map.setUnitUidCounter(counter); }
+  }
+
+  /** The special-factory menu callback, before the ordinary unit/production ladder. */
+  chooseMenuItem(
+    game: Game, core: CoreAI, unitIds: readonly string[], enabled: readonly boolean[],
+    buildings: readonly BuildingHost[],
+  ): number {
+    this.initialize(core.player, buildings);
+    const context = createProductionContext(game, core, buildings, [], []);
+    const system = {
+      getInit: () => this.ready,
+      getEnabled: () => true,
+      getProductionFromList: (ids: string[], units: { items: Unit[] }, owned: { items: BuildingHost[] },
+        minMode: number, maxMode: number, enableList: boolean[]) =>
+        this.getProductionFromList(core.player, ids, units.items, owned.items, minMode, maxMode, enableList),
+    };
+    const result = PRODUCTION_POLICY.getFactoryMenuItem({ getSimpleProductionSystem: () => system }, null,
+      [...unitIds], [], [...enabled], context.units, context.buildings, core.player, context.map);
+    return typeof result === 'number' && Number.isInteger(result) ? result : -1;
+  }
+
+  /** ai/productionSystem/simpleproductionsystem.cpp:788, including its negative cost ceiling. */
+  private getProductionFromList(
+    player: Player, unitIds: readonly string[], units: readonly Unit[], buildings: readonly BuildingHost[],
+    minMode: number, maxMode: number, enabled: readonly boolean[],
+  ): number {
+    if (this.activeDistribution.size === 0) this.updateActive(buildings);
+    // Pinned upstream passes -1 directly, unlike buildNextUnit's funds fallback.
+    // This excludes nonnegative prices and returns -1 for ordinary rosters;
+    // CoreAI's building-menu driver then uses its enabled-item fallback.
+    const ranked = this.getBuildDistribution(player, units, minMode, maxMode, 0, -1);
+    let index = -1;
+    const allowed = () => index >= 0 && (enabled.length === 0 || enabled[index]);
+    for (const { distribution } of ranked) {
+      if (distribution.unitIds.length === 1) {
+        index = unitIds.indexOf(distribution.unitIds[0]);
+      } else {
+        for (let attempt = 0; attempt < distribution.unitIds.length * 3; attempt++) {
+          const roll = Math.floor(this.random() * (distribution.totalChance + 1));
+          let chance = 0;
+          for (let i = 0; i < distribution.unitIds.length; i++) {
+            if (roll < chance + distribution.chance[i]) index = unitIds.indexOf(distribution.unitIds[i]);
+            else chance += distribution.chance[i];
+            if (allowed()) break;
+          }
+          if (allowed()) break;
+        }
+      }
+      if (allowed()) break;
+    }
+    return index;
+  }
+
+  /** Full normal policy, including reactive queues and staged funds/danger budgets. */
+  chooseAction(
+    game: Game, core: CoreAI, buildings: readonly BuildingHost[], enemyUnits: readonly Unit[],
+    enemyBuildings: readonly BuildingHost[], canBuild?: (at: { x: number; y: number }, unitId: string) => boolean,
+  ): ActionDescriptor | null {
+    const player = core.player;
+    this.initialize(player, buildings);
+    const context = createProductionContext(game, core, [...buildings], [...enemyUnits], [...enemyBuildings]);
+    context.enemyUnits.pruneEnemies(context.units, context.buildings,
+      core.config.ownBuildingPruneRange, core.config.enemyPruneRange);
+    const visibleEnemies = context.enemyUnits.items;
+    const nearest = (building: BuildingHost) => Math.min(...visibleEnemies.map(unit =>
+      Math.abs(building.getX() - unit.x) + Math.abs(building.getY() - unit.y)));
+    buildings = [...buildings].sort((a, b) => nearest(a) - nearest(b));
+    context.buildings.items.splice(0, context.buildings.items.length, ...buildings);
+    const system = this.scriptSystem(player);
+    const turn = `${game.day}:${player.getPlayerID()}`;
+    if (this.preparedForTurn !== turn) {
+      this.producedCount = 0;
+      PRODUCTION_POLICY.onNewBuildQueue(system, context.ai, context.buildings, context.units,
+        context.enemyUnits, context.enemyBuildings, context.map, [1, 1, 1, 1]);
+      this.preparedForTurn = turn;
+    }
+    this.updateActive(buildings);
+    const islandSizes = new Map<string, number>();
+    const islandSize = (id: string, building: BuildingHost): number => {
+      const key = `${id}@${building.getX()},${building.getY()}`;
+      let size = islandSizes.get(key);
+      if (size === undefined) {
+        const dummy = this.dummy(player, id);
+        const island = core.islandMaps[core.getIslandIndex(dummy)];
+        const index = island.getIsland(building.getX(), building.getY());
+        size = index < 0 ? 0 : island.getIslandSize(index);
+        islandSizes.set(key, size);
+      }
+      return size;
+    };
+    const averages = new Map<BuildingHost, number>();
     for (const building of buildings) {
       if (!building.isProductionBuilding()) continue;
-      for (const unitId of building.getConstructionList()) buildable.add(unitId);
+      const ids = building.getConstructionList();
+      averages.set(building, ids.length ? ids.reduce((sum, id) => sum + islandSize(id, building), 0) / ids.length : 0);
     }
-    const groupBuildable = (group: BuildGroup) => group.unitIds.some(id => buildable.has(id));
-
-    const naval = groupBuildable(BUILD_GROUPS.lightNavalGroup ?? BUILD_GROUPS.infantryGroup)
-      || groupBuildable(BUILD_GROUPS.mediumNavalGroup ?? BUILD_GROUPS.infantryGroup);
-    const air = groupBuildable(BUILD_GROUPS.lightAirGroup ?? BUILD_GROUPS.infantryGroup)
-      || groupBuildable(BUILD_GROUPS.heavyAirGroup ?? BUILD_GROUPS.infantryGroup);
-    // getGroundModifier: ground shrinks in proportion to how many other
-    // theatres are in play, so a naval map does not drown in tanks.
-    let groundModifier = 1;
-    if (naval) groundModifier *= 0.5;
-    if (air) groundModifier *= 0.5;
-
-    for (const group of Object.values(BUILD_GROUPS)) {
-      const isNaval = /NAVAL/.test(group.name);
-      const isAir = /AIR/.test(group.name);
-      if (isNaval && !naval) continue;
-      if (isAir && !air) continue;
-      const isGround = !isNaval && !isAir;
-      this.addItemToBuildDistribution(
-        group, group.distribution * (isGround ? groundModifier : 1));
-    }
-    this.initialised = true;
+    const reach = new Map<Unit, Array<{ x: number; y: number }>>();
+    const reasonable = (at: { x: number; y: number }, id: string): boolean => {
+      const target = this.dummy(player, id);
+      for (const enemy of visibleEnemies) {
+        const position = { x: enemy.x, y: enemy.y };
+        if (Math.abs(at.x - enemy.x) + Math.abs(at.y - enemy.y) > this.maxDamageCheckRange
+          || !(enemy.hasAmmo1() || enemy.hasAmmo2())) continue;
+        const damage = Math.max(...[enemy.weapon1ID, enemy.weapon2ID].map(weapon =>
+          Number(game.registry[weapon]?.getBaseDamage?.(target) ?? 0)));
+        if (damage < this.maxSingleDamage) continue;
+        let positions = reach.get(enemy);
+        if (!positions) {
+          positions = enemy.canMoveAndFire(position)
+            ? [...computeMovementRange(game.map, enemy, { visibilityPlayer: player }).tiles.values()] : [position];
+          reach.set(enemy, positions);
+        }
+        if (positions.some(point => {
+          const distance = Math.abs(point.x - at.x) + Math.abs(point.y - at.y);
+          return distance >= enemy.getMinRange(position) && distance <= enemy.getMaxRange(position);
+        })) return false;
+      }
+      return true;
+    };
+    let chosen: ActionDescriptor | null = null;
+    const scripted = { ...system,
+      buildNextUnit: (_buildings: unknown, _units: unknown, minMode: number, maxMode: number,
+        minIsland: number, minCost: number, maxCost: number, alwaysBuild = false): boolean => {
+        chosen = this.buildNextUnit(game, player, buildings, player.units, (at, id) => {
+          if (!apparentCanProduceAt(game, at.x, at.y)) return false;
+          const building = game.map.getTerrain(at.x, at.y).getBuilding();
+          if (!building || !game.buildOptions(building).some(option => option.id === id && option.affordable)) return false;
+          if (canBuild && !canBuild(at, id)) return false;
+          if ((averages.get(building) ?? 0) * minIsland > islandSize(id, building)) return false;
+          return alwaysBuild || reasonable(at, id);
+        }, minMode, maxMode, minCost, maxCost);
+        if (chosen) this.producedCount++;
+        return chosen !== null;
+      },
+    };
+    PRODUCTION_POLICY.buildUnitSimpleProductionSystem(scripted, context.ai, context.buildings,
+      context.units, context.enemyUnits, context.enemyBuildings, context.map);
+    return chosen;
   }
 
   get ready(): boolean { return this.initialised; }
 
-  /** Base distributions reflect the factories owned when this system was initialized. */
+  /** Persist policy history as well as queues so a resumed turn retains its budget. */
   saveState(): unknown {
     return this.initialised ? structuredClone({
       initialProduction: this.initialProduction, forcedProduction: this.forcedProduction,
       buildDistribution: [...this.buildDistribution],
+      variables: this.variables.toJSON(), preparedForTurn: this.preparedForTurn,
+      producedCount: this.producedCount, maxDamageCheckRange: this.maxDamageCheckRange, maxSingleDamage: this.maxSingleDamage,
     }) : null;
   }
 
   loadState(value: unknown, _player: Player, _buildings: readonly BuildingHost[]): void {
     if (!value || typeof value !== 'object') return;
-    const state = value as { initialProduction?: unknown; forcedProduction?: unknown; buildDistribution?: unknown };
+    const state = value as { initialProduction?: unknown; forcedProduction?: unknown; buildDistribution?: unknown;
+      variables?: Record<string, unknown>; preparedForTurn?: string; producedCount?: number;
+      maxDamageCheckRange?: number; maxSingleDamage?: number };
     const ids = (value: unknown): value is string[] => Array.isArray(value)
       && value.length < 1000 && value.every(id => typeof id === 'string');
     if (!Array.isArray(state.initialProduction) || !Array.isArray(state.forcedProduction)
@@ -116,7 +259,7 @@ export class ProductionSystem {
         && Number.isSafeInteger(item.count) && item.count >= 0)
       || !state.forcedProduction.every(item => item && ids(item.unitIds))) return;
     // The active subset is derived from current factories by updateActive, but
-    // the base weights must survive captured or lost airports and ports.
+    // saved weights remain in effect until the policy refreshes its topology.
     if (!Array.isArray(state.buildDistribution) || state.buildDistribution.length > 1000
       || !state.buildDistribution.every(entry => {
         if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string') return false;
@@ -128,12 +271,33 @@ export class ProductionSystem {
             typeof item[key] === 'number' && Number.isFinite(item[key]) && item[key] >= 0)
           && item.totalChance === item.chance.reduce((sum: number, n: number) => sum + n, 0);
       }) || new Set(state.buildDistribution.map(entry => entry[0])).size !== state.buildDistribution.length) return;
+    if (state.variables !== undefined && (!state.variables || typeof state.variables !== 'object' || Array.isArray(state.variables)
+      || !Object.values(state.variables).every(value => value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)))) return;
+    if (state.preparedForTurn !== undefined && typeof state.preparedForTurn !== 'string') return;
+    for (const field of ['producedCount', 'maxDamageCheckRange', 'maxSingleDamage'] as const) {
+      const value = state[field];
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) return;
+    }
+    if (!state.forcedProduction.every(item =>
+      (item.targetUids === undefined || (Array.isArray(item.targetUids) && item.targetUids.every((id: unknown) => Number.isSafeInteger(id))))
+      && (item.x === undefined || Number.isSafeInteger(item.x)) && (item.y === undefined || Number.isSafeInteger(item.y)))) return;
+    this.variables.fromJSON(state.variables ?? {});
+    this.preparedForTurn = state.preparedForTurn ?? '';
+    this.producedCount = state.producedCount ?? 0;
+    this.maxDamageCheckRange = state.maxDamageCheckRange ?? 10;
+    this.maxSingleDamage = state.maxSingleDamage ?? 70;
     this.buildDistribution.clear();
     for (const [name, item] of structuredClone(state.buildDistribution)) this.buildDistribution.set(name, item);
     this.activeDistribution.clear();
     this.initialised = true;
     this.initialProduction = structuredClone(state.initialProduction);
     this.forcedProduction = structuredClone(state.forcedProduction);
+    // Saves from the earlier table-only adapter lack policy variables. Upgrade
+    // their base weights once, retaining every unfilled opening/forced purchase.
+    if (state.variables === undefined && state.preparedForTurn === undefined) {
+      this.buildDistribution.clear();
+      this.initializePolicy(_player, false);
+    }
   }
 
   /** ai/productionSystem: SimpleProductionSystem::addItemToBuildDistribution. */
@@ -166,7 +330,7 @@ export class ProductionSystem {
       for (const unitId of building.getConstructionList()) buildable.add(unitId);
     }
     this.activeDistribution = new Map();
-    for (const [name, item] of this.buildDistribution) {
+    for (const [name, item] of [...this.buildDistribution].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
       const kept: string[] = [], chances: number[] = [];
       for (let i = 0; i < item.unitIds.length; i++) {
         if (!buildable.has(item.unitIds[i])) continue;
@@ -268,8 +432,19 @@ export class ProductionSystem {
     }
 
     for (let i = 0; i < this.forcedProduction.length; i++) {
-      for (const unitId of this.forcedProduction[i].unitIds) {
-        const action = this.buildUnit(buildings, unitId, canBuild);
+      const item = this.forcedProduction[i];
+      let ordered = [...buildings];
+      if (item.x !== undefined && item.y !== undefined && game.map.onMap(item.x, item.y)) {
+        const target = game.map.getTerrain(item.x, item.y).getBuilding();
+        if (target?.getOwner() === player) ordered = [target];
+      } else if (item.targetUids) {
+        const targets = item.targetUids.map(uid => game.map.getUnitByUid(uid)).filter((unit): unit is Unit => unit !== null && !unit.isStealthed(player));
+        const distance = (building: BuildingHost) => Math.min(...targets.map(unit =>
+          Math.abs(building.getX() - unit.x) + Math.abs(building.getY() - unit.y)));
+        ordered.sort((a, b) => distance(a) - distance(b));
+      }
+      for (const unitId of item.unitIds) {
+        const action = this.buildUnit(ordered, unitId, canBuild);
         if (action !== null) { this.forcedProduction.splice(i, 1); return action; }
       }
     }

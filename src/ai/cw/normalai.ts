@@ -2,16 +2,20 @@ import type { Agent } from '../agent.ts';
 import type { ActionDescriptor } from '../actions.ts';
 import type { GameEnvironment } from '../environment.ts';
 import type { Game } from '../../game/game.ts';
-import type { BuildingHost, Player, Unit } from '../../host/index.ts';
+import { Unit, type BuildingHost, type Player } from '../../host/index.ts';
 import { computeMovementRange, key } from '../../game/pathfinding.ts';
+import { apparentCanProduceAt, isKnownBuilding, visibleUnitAt } from './visibility.ts';
 import { CoreAI } from './coreai.ts';
 import { ProductionSystem } from './production.ts';
+import { moveFlares, moveOoziums, moveBlackBombs } from './special-actions.ts';
+import { selectMovementAction } from './movement-actions.ts';
+import { selectBuildingAction } from './building-actions.ts';
 import { CwAction, isRefuelUnit } from './actions.ts';
 import { NORMAL_AI_DEFAULTS, type NormalAiConfig } from './config.ts';
 import { InfluenceFrontMap } from './influencefrontmap.ts';
 import { TargetedUnitPathFindingSystem } from './targetedpfs.ts';
 import { createUnitData, sortUnitsFarFromEnemyFirst, type MoveUnitData } from './unitdata.ts';
-import { getAttackTargets, getBestTarget, type MoveTargetField, type TargetScoringOptions } from './targets.ts';
+import { getAttackTargets, getBestAttacksFromField, getBestTarget, type MoveTargetField, type TargetScoringOptions } from './targets.ts';
 import { getBestAttackTarget, type ScoringContext } from './scoring.ts';
 import {
   appendTerrainBuildingAttackTargets, getClosestReachableMovePath, getMoveTargetField,
@@ -19,7 +23,7 @@ import {
 } from './movement.ts';
 import {
   appendCaptureTransporterTargets, appendLoadingTargets, appendNearestUnloadTargets,
-  appendTransporterTargets, appendUnloadTargetsForAttacking, appendUnloadTargetsForCapturing,
+  appendTransporterTargets, appendUnloadTargetsForAttacking, appendUnloadTargetsForCapturing, appendSupportTargets,
 } from './transport.ts';
 
 /**
@@ -44,15 +48,7 @@ const AISteps = {
 // import path.
 type AISteps = typeof AISteps[keyof typeof AISteps];
 
-/**
- * ai/coreai.js: COREAI.highPrioBuildings.
- *
- * Hard-coded rather than read from the script, because the script cannot be
- * read: `resources/aidata/normal/__coreai.js` has a syntax error on line 3
- * (`highPrioBuildings = [...]` inside an object literal) at upstream HEAD, so
- * the whole COREAI object fails to parse and every reference to it throws. See
- * README.md -- this is upstream's shipped state, not a local problem.
- */
+/** Capture priority shared with the pinned __coreai.js production policy. */
 const HIGH_PRIO_BUILDINGS = ['FACTORY'];
 
 /** ai/capturebuildingselector.h: one (unit, building) pairing under consideration. */
@@ -73,9 +69,8 @@ export interface NormalAiOptions {
  * maps across directly: each call walks the rungs and returns the first action
  * any of them produces.
  *
- * This is the land ladder. Transport rungs (loadUnits, moveTransporters,
- * moveToUnloadArea) and the full production system are not wired in yet; their
- * substrate is ported and tested, but the rungs themselves are pending.
+ * Includes the transport pass and the subsequent retry of unspent units.
+ * Remaining deviations from upstream are tracked in the fidelity audit.
  */
 export class NormalAi implements Agent {
   readonly name: string;
@@ -87,6 +82,8 @@ export class NormalAi implements Agent {
   private aiStep: number = AISteps.moveUnits;
   private aiFunctionStep = 0;
   private secondMoveRound = false;
+  private usedTransportSystem = false;
+  private virtualDamageInitialized = false;
   private rngState: number;
   private savedProduction: unknown;
   /** Far-away capture targets already claimed this turn. */
@@ -98,8 +95,6 @@ export class NormalAi implements Agent {
    * single turn and never reaches the rest of the distribution.
    */
   private readonly production: ProductionSystem;
-  /** Whether a unit id can leave a given factory; see canBuildHere. */
-  private readonly mobility = new Map<string, boolean>();
 
   constructor(options: NormalAiOptions = {}) {
     this.config = { ...NORMAL_AI_DEFAULTS, ...options.config };
@@ -144,12 +139,11 @@ export class NormalAi implements Agent {
     this.aiStep = AISteps.moveUnits;
     this.aiFunctionStep = 0;
     this.secondMoveRound = false;
+    this.usedTransportSystem = false;
+    this.virtualDamageInitialized = false;
     this.usedFarAwayBuildings = [];
 
-    // ai/normalai.cpp: process() sets the silo flag once per turn, before any
-    // decision reads it.
-    const silo = player.getSiloRockettarget(2, 3, 1, 0, null, count => this.randomIndex(count));
-    this.core.missileTarget = silo.damage >= this.config.minSiloDamage;
+
   }
 
   private targetOptions(): TargetScoringOptions {
@@ -179,7 +173,7 @@ export class NormalAi implements Agent {
   }
 
   private enemyBuildings(game: Game, player: Player): BuildingHost[] {
-    return this.buildingsWhere(game, building => building.isEnemyBuilding(player));
+    return this.buildingsWhere(game, building => isKnownBuilding(building, player) && building.isEnemyBuilding(player));
   }
 
   private buildingsWhere(game: Game, keep: (b: BuildingHost) => boolean): BuildingHost[] {
@@ -198,7 +192,7 @@ export class NormalAi implements Agent {
     for (let i = 0; i < player.map.getPlayerCount(); i++) {
       const other = player.map.getPlayer(i);
       if (!other || !player.isEnemy(other)) continue;
-      units.push(...other.units);
+      units.push(...other.units.filter(unit => !unit.isStealthed(player)));
     }
     return units;
   }
@@ -218,17 +212,28 @@ export class NormalAi implements Agent {
     const previousSteps = new Map<number, number>();
     for (const data of this.ownUnits) previousSteps.set(data.unit.uid, data.nextAiStep);
 
-    this.enemyUnits = enemies.map(unit =>
-      createUnitData(unit, true, this.config.influenceUnitRange, [], this.aiFunctionStep, false));
     this.ownUnits = own.map(unit => {
       const data = createUnitData(
-        unit, false, this.config.influenceUnitRange, this.enemyUnits, this.aiFunctionStep, true);
+        unit, false, this.config.influenceUnitRange, [], this.aiFunctionStep, true);
       // A unit already offered a rung this turn keeps its place in the ladder.
       const seen = previousSteps.get(unit.uid);
       if (seen !== undefined) data.nextAiStep = seen;
       return data;
     });
+    // Enemy reach is pruned against nearby friendly units, so their data must
+    // exist first. An empty list silently suppresses every enemy movement range.
+    const previousDamage = new Map(this.enemyUnits.map(data => [data.unit.uid, data.virtualDamageData]));
+    this.enemyUnits = enemies.map(unit => {
+      const data = createUnitData(unit, true, this.config.influenceUnitRange, this.ownUnits, this.aiFunctionStep, false, player);
+      data.virtualDamageData = previousDamage.get(unit.uid) ?? 0;
+      return data;
+    });
     sortUnitsFarFromEnemyFirst(this.ownUnits, enemies);
+
+    if (!this.virtualDamageInitialized) {
+      this.calculateVirtualDamage(game);
+      this.virtualDamageInitialized = true;
+    }
 
     const influence = this.influence!;
     influence.clear();
@@ -239,6 +244,28 @@ export class NormalAi implements Agent {
     }
     influence.updateOwners();
     influence.calculateGlobalData();
+  }
+
+  /** NormalAi::calcVirtualDamage: distribute each ally's projected attacks once per turn. */
+  private calculateVirtualDamage(game: Game): void {
+    const enemies = new Map(this.enemyUnits.map(data => [key(data.unit.x, data.unit.y), data]));
+    for (const own of this.ownUnits) {
+      if (own.range === null || !this.isUsingUnit(game, own.unit)) continue;
+      const { targets } = getAttackTargets(
+        game, this.core!.predictor, own.unit, own.range, this.targetOptions(), own.movementPoints * 2);
+      const attacks = new Map<string, number>();
+      for (const target of targets) {
+        const position = key(target.x, target.y);
+        if (attacks.has(position)) continue;
+        const distance = Math.abs(own.unit.x - target.x) + Math.abs(own.unit.y - target.y);
+        const divisor = distance > own.movementPoints ? Math.trunc(own.movementPoints / 2 + 1) : 1;
+        attacks.set(position, target.hpDamage / divisor);
+      }
+      for (const [position, damage] of attacks) {
+        const enemy = enemies.get(position);
+        if (enemy) enemy.virtualDamageData += this.config.enemyUnitCountDamageReductionMultiplier * damage / attacks.size;
+      }
+    }
   }
 
   // --- action construction ----------------------------------------------
@@ -265,10 +292,28 @@ export class NormalAi implements Agent {
     const game = env.game;
     const player = game.currentPlayer;
     if (this.core === null || this.core.player !== player) this.beginTurn(env);
-    this.refresh(game, player);
-
+    // Native process recomputes silo value after every committed action.
+    const silo = player.getSiloRockettarget(2, 3, 1, 0, null, count => this.randomIndex(count));
+    this.core!.missileTarget = silo.damage >= this.config.minSiloDamage;
     const buildings = this.ownBuildings(game, player);
     const enemyBuildings = this.enemyBuildings(game, player);
+    if (this.savedProduction !== undefined) {
+      this.production.loadState(this.savedProduction, player, buildings);
+      this.savedProduction = undefined;
+    }
+    this.production.initialize(player, buildings);
+    const buildingAction = selectBuildingAction(game, buildings, count => this.randomIndex(count),
+      (building, _actionId, entries) => {
+        const factory = ['ZBLACKHOLE_FACTORY', 'ZBLACKHOLE_FACTORYWASTE', 'ZBLACKHOLE_FACTORYSNOW',
+          'ZBLACKHOLE_FACTORYDESERT', 'ZNEST_FACTORY'].includes(building.getBuildingID());
+        const choice = factory ? this.production.chooseMenuItem(game, this.core!,
+          entries.map(entry => entry.actionID), entries.map(entry => entry.enabled), buildings) : -1;
+        // Native CoreAI falls back to a random enabled item when the policy
+        // callback cannot select one (including its pinned -1 cost-ceiling bug).
+        return entries[choice >= 0 && choice < entries.length ? choice : this.randomIndex(entries.length)].actionID;
+      });
+    if (buildingAction) return buildingAction;
+    this.refresh(game, player);
     const enemyUnits = this.enemyUnits.map(data => data.unit);
 
     // Each rung is tried in turn; the first to produce an action wins the call.
@@ -287,6 +332,11 @@ export class NormalAi implements Agent {
     buildings: BuildingHost[], enemyBuildings: BuildingHost[], enemyUnits: Unit[],
   ): ActionDescriptor | null {
     if (this.aiStep <= AISteps.moveUnits) {
+      const units = this.ownUnits.map(data => data.unit);
+      const special = moveFlares(this.core!, units, count => this.randomIndex(count))
+        ?? moveOoziums(this.core!, units, enemyUnits)
+        ?? moveBlackBombs(this.core!, units, enemyUnits, count => this.randomIndex(count));
+      if (special) return special;
       const captured = this.captureBuildings(game, enemyBuildings);
       if (captured !== null) return captured;
       // Indirects first, then directs -- artillery that has to stand still
@@ -317,24 +367,44 @@ export class NormalAi implements Agent {
         game, player, buildings, enemyBuildings, enemyUnits, 2, Number.MAX_SAFE_INTEGER);
       if (moved !== null) return moved;
     }
-    if (this.aiStep <= AISteps.moveSupportUnits) {
-      const supported = this.moveSupport(game, AISteps.moveSupportUnits, true);
-      if (supported !== null) return supported;
+    if (this.aiStep <= AISteps.loadUnits && !this.usedTransportSystem) {
+      const loaded = this.loadUnits(game, buildings, enemyBuildings);
+      if (loaded !== null) return loaded;
+    }
+    if (this.aiStep <= AISteps.moveTransporters && !this.usedTransportSystem) {
+      const ferried = this.moveTransporters(game, buildings, enemyBuildings, enemyUnits);
+      if (ferried !== null) return ferried;
+    }
+    if (!this.usedTransportSystem) {
+      // Upstream retries ordinary orders after transports have moved/unloaded.
+      // Reset only unspent units; this pass is entered at most once per turn.
+      this.usedTransportSystem = true;
+      this.aiStep = AISteps.moveUnits;
+      this.aiFunctionStep = 0;
+      for (const data of this.ownUnits) {
+        if (!data.unit.getHasMoved()) data.nextAiStep = 0;
+      }
+      return this.step(game, player, buildings, enemyBuildings, enemyUnits);
     }
     if (this.aiStep <= AISteps.loadUnits) {
       const loaded = this.loadUnits(game, buildings, enemyBuildings);
       if (loaded !== null) return loaded;
     }
-    if (this.aiStep <= AISteps.moveTransporters) {
-      const ferried = this.moveTransporters(game, buildings, enemyBuildings, enemyUnits);
-      if (ferried !== null) return ferried;
+    if (this.aiStep <= AISteps.moveSupportUnits) {
+      const supported = this.moveSupport(game, AISteps.moveSupportUnits, true);
+      if (supported !== null) return supported;
+    }
+    if (this.aiStep <= AISteps.moveSupportUnits) {
+      const moved = this.moveUnits(game, player, buildings, enemyBuildings, enemyUnits,
+        1, Number.MAX_SAFE_INTEGER, true);
+      if (moved !== null) return moved;
     }
     if (this.aiStep <= AISteps.moveAway) {
       const cleared = this.moveAwayFromProduction(game);
       if (cleared !== null) return cleared;
     }
     if (this.aiStep <= AISteps.buildUnits) {
-      const built = this.buildUnits(game, player, buildings, enemyUnits);
+      const built = this.buildUnits(game, player, buildings, enemyUnits, enemyBuildings);
       if (built !== null) return built;
     }
     this.aiStep = AISteps.buildUnits + 1;
@@ -360,7 +430,7 @@ export class NormalAi implements Agent {
 
       for (const tile of data.range.tiles.values()) {
         if (tile.cost > data.movementPoints) continue;
-        const other = game.map.getTerrain(tile.x, tile.y).getUnit();
+        const other = visibleUnitAt(game.map, this.core!.player, tile.x, tile.y);
         if (other === null || other === unit) continue;
         if (other.getCapturePoints() <= 0) continue;
         if (!this.canPerform(game, unit, tile, CwAction.JOIN)) continue;
@@ -378,6 +448,7 @@ export class NormalAi implements Agent {
   private refillUnits(
     game: Game, buildings: BuildingHost[], enemyBuildings: BuildingHost[],
   ): ActionDescriptor | null {
+    if (this.aiStep < AISteps.moveToTargets) this.core!.createMovementMap(buildings, enemyBuildings);
     this.aiStep = AISteps.moveToTargets;
     const core = this.core!;
     for (const data of this.ownUnits) {
@@ -440,13 +511,13 @@ export class NormalAi implements Agent {
 
     for (const tile of range.tiles.values()) {
       if (tile.cost > data.movementPoints) continue;
-      if (game.map.getTerrain(tile.x, tile.y).getUnit() !== null) continue;
+      if (visibleUnitAt(game.map, this.core!.player, tile.x, tile.y) !== null) continue;
       let count = 0;
       let lastNeedy: Point | null = null;
       for (const [dx, dy] of ring) {
         const x = tile.x + dx, y = tile.y + dy;
         if (!game.map.onMap(x, y)) continue;
-        const supply = game.map.getTerrain(x, y).getUnit();
+        const supply = visibleUnitAt(game.map, this.core!.player, x, y);
         if (supply === null || supply.getOwner() !== this.core!.player) continue;
         if (!this.core!.needsRefuel(supply)) continue;
         count++;
@@ -505,7 +576,7 @@ export class NormalAi implements Agent {
       for (const [dx, dy] of ring) {
         const x = unit.getX() + dx, y = unit.getY() + dy;
         if (!game.map.onMap(x, y)) continue;
-        if (game.map.getTerrain(x, y).getUnit() !== null) continue;
+        if (visibleUnitAt(game.map, this.core!.player, x, y) !== null) continue;
         if (unitTargets.some(t => t.x === x && t.y === y && t.z === 1)) continue;
         unitTargets.push({ x, y, z: 1 });
         unitPos.push({ x: unit.getX(), y: unit.getY() });
@@ -667,66 +738,64 @@ export class NormalAi implements Agent {
     const cargo = game.cargoOf(unit);
     if (cargo.length === 0) return null;
 
-    const drops = cargo.map(entry => ({
+    const probe = game.probeAction(CwAction.UNLOAD, unit, at);
+    if (probe.kind !== 'field' && probe.kind !== 'menu') return null;
+    const remaining = cargo.map(entry => ({
       entry,
-      fields: game.unloadTargets(unit, entry.index),
+      fields: game.unloadTargets(unit, entry.index, at),
     })).filter(candidate => candidate.fields.length > 0
       && !this.core!.needsRefuel(candidate.entry.unit));
-    if (drops.length === 0) return null;
-
-    const single = drops.find(candidate => candidate.fields.length === 1);
-    if (single !== undefined) {
-      return this.unloadDescriptor(game, unit, at, single.entry.index, single.fields[0]);
-    }
-    for (const candidate of drops) {
-      if (!candidate.entry.unit.getActionList().includes(CwAction.CAPTURE)) continue;
-      const onBuilding = candidate.fields.find(field => {
-        const building = game.map.getTerrain(field.x, field.y).getBuilding();
-        return building !== null && this.core!.player.isEnemy(building.getOwner());
-      });
-      if (onBuilding !== undefined) {
-        return this.unloadDescriptor(game, unit, at, candidate.entry.index, onBuilding);
+    const steps: Array<Point | string> = [];
+    const occupied = new Set<string>();
+    let first = true;
+    while (remaining.length > 0) {
+      for (const candidate of remaining) {
+        candidate.fields = candidate.fields.filter(field => !occupied.has(key(field.x, field.y)));
       }
-    }
-    // Fallback: put the first passenger down as close to the enemy as we can.
-    const first = drops[0];
-    let best = first.fields[0], bestDistance = Number.MAX_SAFE_INTEGER;
-    for (const field of first.fields) {
-      let nearest = Number.MAX_SAFE_INTEGER;
-      for (const enemy of enemyUnits) {
-        const distance = Math.abs(field.x - enemy.getX()) + Math.abs(field.y - enemy.getY());
-        if (distance < nearest) nearest = distance;
+      const available = remaining.filter(candidate => candidate.fields.length > 0);
+      if (available.length === 0) break;
+      // Upstream puts passengers with only one drop first, then capturers on
+      // enemy buildings, then the first remaining passenger nearest an enemy.
+      let choice = available.find(candidate => candidate.fields.length === 1);
+      let field = choice?.fields[0];
+      if (!choice) {
+        for (const candidate of available) {
+          if (!candidate.entry.unit.getActionList().includes(CwAction.CAPTURE)) continue;
+          const buildingField = candidate.fields.find(field => {
+            const building = game.map.getTerrain(field.x, field.y).getBuilding();
+            return building !== null && isKnownBuilding(building, this.core!.player)
+              && this.core!.player.isEnemy(building.getOwner());
+          });
+          if (buildingField) { choice = candidate; field = buildingField; break; }
+        }
       }
-      if (nearest < bestDistance) { bestDistance = nearest; best = field; }
+      if (!choice) {
+        choice = available[0];
+        field = choice.fields[0];
+        let bestDistance = Number.MAX_SAFE_INTEGER;
+        for (const candidate of choice.fields) {
+          for (const enemy of enemyUnits) {
+            const distance = Math.abs(candidate.x - enemy.x) + Math.abs(candidate.y - enemy.y);
+            if (distance < bestDistance) { bestDistance = distance; field = candidate; }
+          }
+        }
+      }
+      // Menu IDs retain the original cargo index even when earlier cargo has
+      // no legal drop. Only the first single-choice menu can be auto-skipped.
+      const id = String(choice.entry.index);
+      if (first && probe.kind === 'menu' && !probe.entries.some(entry => entry.actionID === id)) return null;
+      if (!first || probe.kind === 'menu') steps.push(id);
+      steps.push({ x: field!.x, y: field!.y });
+      occupied.add(key(field!.x, field!.y));
+      remaining.splice(remaining.indexOf(choice), 1);
+      first = false;
     }
-    return this.unloadDescriptor(game, unit, at, first.entry.index, best);
-  }
-
-  /**
-   * ACTION_UNLOAD as a descriptor.
-   *
-   * With one passenger the action goes straight to picking a tile; with several
-   * it asks which passenger first, so the step list is one longer.
-   */
-  private unloadDescriptor(
-    game: Game, unit: Unit, at: Point, cargoIndex: number, field: Point,
-  ): ActionDescriptor | null {
-    const probe = game.probeAction(CwAction.UNLOAD, unit, at);
-    if (probe.kind === 'field') {
-      return {
-        kind: 'unit', uid: unit.uid, actionId: CwAction.UNLOAD,
-        to: { x: at.x, y: at.y }, steps: [{ x: field.x, y: field.y }],
-      };
-    }
-    if (probe.kind === 'menu') {
-      const entry = probe.entries[cargoIndex] ?? probe.entries[0];
-      if (entry === undefined) return null;
-      return {
-        kind: 'unit', uid: unit.uid, actionId: CwAction.UNLOAD,
-        to: { x: at.x, y: at.y }, steps: [entry.actionID, { x: field.x, y: field.y }],
-      };
-    }
-    return null;
+    if (first) return null;
+    // Finish the hosted multi-step action even if some cargo must stay aboard.
+    // With a single drop the script can already be done; applyAction stops there.
+    steps.push(CwAction.WAIT);
+    return { kind: 'unit', uid: unit.uid, actionId: CwAction.UNLOAD,
+      to: { x: at.x, y: at.y }, steps };
   }
 
   /**
@@ -756,9 +825,9 @@ export class NormalAi implements Agent {
         if (tile.cost <= 0 || tile.cost > data.movementPoints) continue;
         if (!tile.canStop) continue;
         const newTerrain = game.map.getTerrain(tile.x, tile.y);
-        if (newTerrain.getUnit() !== null) continue;
+        if (visibleUnitAt(game.map, this.core!.player, tile.x, tile.y) !== null) continue;
         const newBuilding = newTerrain.getBuilding();
-        if (newBuilding !== null && newBuilding.isProductionBuilding()) continue;
+        if (newBuilding !== null && isKnownBuilding(newBuilding, this.core!.player) && newBuilding.isProductionBuilding()) continue;
         if (!this.canPerform(game, unit, tile, CwAction.WAIT)) continue;
         return this.unitAction(unit, CwAction.WAIT, tile);
       }
@@ -775,7 +844,7 @@ export class NormalAi implements Agent {
    * one whose absence produced the piperunner stalemate.
    */
   private buildUnits(
-    game: Game, player: Player, buildings: BuildingHost[], _enemyUnits: Unit[],
+    game: Game, player: Player, buildings: BuildingHost[], enemyUnits: Unit[], enemyBuildings: BuildingHost[],
   ): ActionDescriptor | null {
     const production = this.production;
     const owned = buildings.filter(building => building.getOwner() === player);
@@ -783,11 +852,8 @@ export class NormalAi implements Agent {
       production.loadState(this.savedProduction, player, owned);
       this.savedProduction = undefined;
     }
-    if (!production.ready) production.initialize(player, owned);
-    production.updateActive(owned);
-
-    const action = production.buildNextUnit(
-      game, player, owned, player.units,
+    const action = production.chooseAction(
+      game, this.core!, owned, enemyUnits, enemyBuildings,
       (at, unitId) => this.canBuildHere(game, player, at, unitId));
     if (action === null) this.aiStep = AISteps.buildUnits + 1;
     return action;
@@ -795,24 +861,22 @@ export class NormalAi implements Agent {
 
   /** Affordable, offered by this factory, and able to actually leave it. */
   private canBuildHere(game: Game, player: Player, at: Point, unitId: string): boolean {
-    if (!game.canProduceAt(at.x, at.y)) return false;
+    if (!apparentCanProduceAt(game, at.x, at.y)) return false;
     const building = game.map.getTerrain(at.x, at.y).getBuilding();
     if (building === null) return false;
     if (!game.buildOptions(building).some(o => o.id === unitId && o.affordable)) return false;
 
     const map = game.map;
-    const cacheKey = `${unitId}@${at.x},${at.y}`;
-    const cached = this.mobility.get(cacheKey);
-    if (cached !== undefined) return cached;
-    // A probe consumes a uid, and a uid the real game never issued
-    // desynchronises every later action, so the counter is rewound.
+    // Keep the dummy off the board: installing it on an apparently empty
+    // factory could overwrite an unseen occupant. Ignore transient blockers
+    // when checking whether the unit can ever leave this terrain.
     const uidBefore = map.getUnitUidCounter();
-    const probe = map.addUnit(unitId, player, at.x, at.y);
-    const mobile = computeMovementRange(map, probe).tiles.size > 1;
-    map.removeUnit(probe);
-    map.setUnitUidCounter(uidBefore);
-    this.mobility.set(cacheKey, mobile);
-    return mobile;
+    try {
+      const probe = new Unit(map, unitId, player, at.x, at.y);
+      return computeMovementRange(map, probe, { ignoreEnemies: 'all', visibilityPlayer: player }).tiles.size > 1;
+    } finally {
+      map.setUnitUidCounter(uidBefore);
+    }
   }
 
   /**
@@ -889,7 +953,7 @@ export class NormalAi implements Agent {
 
       for (const tile of data.range.tiles.values()) {
         const building = game.map.getTerrain(tile.x, tile.y).getBuilding();
-        if (building === null) continue;
+        if (building === null || !isKnownBuilding(building, this.core!.player)) continue;
         if (tile.cost < data.movementPoints + 1) {
           if (!tile.canStop) continue;
           if (this.canPerform(game, unit, tile, CwAction.CAPTURE)
@@ -898,7 +962,7 @@ export class NormalAi implements Agent {
           }
         } else if (building.getOwner() === null
           && HIGH_PRIO_BUILDINGS.includes(building.getBuildingID())
-          && game.map.getTerrain(tile.x, tile.y).getUnit() === null
+          && visibleUnitAt(game.map, this.core!.player, tile.x, tile.y) === null
           && !this.usedFarAwayBuildings.some(used => used.x === tile.x && used.y === tile.y)) {
           found.push({ x: tile.x, y: tile.y, unitIdx: i, farAway: true });
         }
@@ -1054,7 +1118,7 @@ export class NormalAi implements Agent {
    */
   private moveUnits(
     game: Game, player: Player, buildings: BuildingHost[], enemyBuildings: BuildingHost[],
-    enemyUnits: Unit[], minFireRange: number, maxFireRange: number,
+    enemyUnits: Unit[], minFireRange: number, maxFireRange: number, supportUnits = false,
   ): ActionDescriptor | null {
     const core = this.core!;
     const AVERAGE_TRANSPORTER_MOVEMENT = 7;
@@ -1069,9 +1133,9 @@ export class NormalAi implements Agent {
       const canCapture = data.actions.includes(CwAction.CAPTURE);
       const loadingIslandIdx = core.getIslandIndex(unit);
       const loadingIsland = core.getIsland(unit);
-      if (!this.isUsingUnit(game, unit)) continue;
-      if (!hasTargets(core, AVERAGE_TRANSPORTER_MOVEMENT, unit, canCapture,
-        enemyUnits, enemyBuildings, loadingIslandIdx, loadingIsland, false)) continue;
+      if (!this.usedTransportSystem && (!this.isUsingUnit(game, unit)
+        || !hasTargets(core, AVERAGE_TRANSPORTER_MOVEMENT, unit, canCapture,
+          enemyUnits, enemyBuildings, loadingIslandIdx, loadingIsland, false))) continue;
 
       const targets: MoveTargetField[] = [];
       const transporterTargets: MoveTargetField[] = [];
@@ -1089,6 +1153,8 @@ export class NormalAi implements Agent {
       core.appendAttackTargetsIgnoreOwnUnits(unit, enemyUnits, targets, distanceModifier);
       appendTerrainBuildingAttackTargets(core, unit, enemyBuildings, targets, distanceModifier);
       if (targets.length === 0) core.appendRepairTargets(unit, buildings, targets);
+      if (supportUnits) appendSupportTargets(core, data.actions, unit,
+        this.ownUnits.map(other => other.unit), enemyUnits, targets, distanceModifier);
       if (targets.length === 0 && transporterTargets.length === 0) continue;
 
       const move = this.moveUnit(
@@ -1125,10 +1191,10 @@ export class NormalAi implements Agent {
     const targetField = pfs.getReachableTargetField(data.movementPoints);
     if (targetField.x < 0) return null;
 
-    const targetUnit = game.map.getTerrain(targetField.x, targetField.y).getUnit();
+    const targetUnit = visibleUnitAt(game.map, this.core!.player, targetField.x, targetField.y);
     const wantsTransport = transporterTargets.some(
       t => t.x === targetField.x && t.y === targetField.y);
-    if (wantsTransport && targetUnit !== null && !targetUnit.getHasMoved()
+    if (wantsTransport && targetUnit !== null && (!targetUnit.getHasMoved() || this.usedTransportSystem)
       && this.canPerform(game, unit, targetField, CwAction.LOAD)) {
       return this.unitAction(unit, CwAction.LOAD, targetField);
     }
@@ -1193,6 +1259,14 @@ export class NormalAi implements Agent {
       const shot = this.bestShotFrom(game, data, stop);
       if (shot !== null) return shot;
     }
+    const movementAction = selectMovementAction(context, data, stop, buildings, enemyBuildings,
+      count => this.randomIndex(count));
+    if (movementAction) return movementAction;
+    // The upstream fallback shot after support/placement has no HP gate.
+    if (unit.canMoveAndFire(stop) || stayedPut) {
+      const shot = this.bestShotFrom(game, data, stop, false);
+      if (shot) return shot;
+    }
     if (data.actions.includes(CwAction.CAPTURE)
       && this.canPerform(game, unit, stop, CwAction.CAPTURE)) {
       return this.unitAction(unit, CwAction.CAPTURE, stop);
@@ -1204,23 +1278,15 @@ export class NormalAi implements Agent {
   }
 
   /** The best attack available from one tile, if it clears the suicide floor. */
-  private bestShotFrom(game: Game, data: MoveUnitData, from: Point): ActionDescriptor | null {
+  private bestShotFrom(game: Game, data: MoveUnitData, from: Point, healthGate = true): ActionDescriptor | null {
     const unit = data.unit;
+    const locked = healthGate && from.x === unit.x && from.y === unit.y && unit.getHp() < this.config.lockedUnitHp;
+    if (healthGate && unit.getHp() <= this.config.noMoveAttackHp && !locked) return null;
     if (!this.canPerform(game, unit, from, CwAction.FIRE)) return null;
-    const options = this.targetOptions();
-    const best: MoveTargetField[] = [];
-    for (const target of game.attackTargets(unit, from)) {
-      const damage = this.core!.predictor.calcVirtualUnitDamage(
-        unit, 0, from, target.unit, 0, target);
-      const score = target.unit !== null
-        ? damage.x
-        : damage.x * options.buildingValue;
-      if (best.length === 0 || score > best[0].z) { best.length = 0; }
-      else if (score !== best[0].z) continue;
-      best.push({ x: target.x, y: target.y, z: score });
-    }
+    const { targets: best } = getBestAttacksFromField(
+      game, this.core!.predictor, unit, from, this.targetOptions());
     if (best.length === 0) return null;
-    if (best[0].z < -unit.getCoUnitValue() * this.config.minSuicideDamage) return null;
+    if (!locked && best[0].z < -unit.getCoUnitValue() * this.config.minSuicideDamage) return null;
     const pick = best[this.randomIndex(best.length)];
     return this.unitAction(unit, CwAction.FIRE, from, pick);
   }
