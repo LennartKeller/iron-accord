@@ -62,9 +62,13 @@ offline after the first visit.
 ```bash
 npm run build:data    # 570 maps + 688 sprites -> 6.6 MB in data/
 npm run dev           # dev server; open the printed URL
-npm test              # 115 tests
+npm test              # run the test suite
 npm run typecheck
 ```
+
+Production builds include only runtime assets from `data/`; local training datasets
+are excluded. See [the core debug audit](docs/debug-audit-2026-09-10.md) for recent
+fixes, validation, and remaining limitations.
 
 `build:data` must run before `dev` — it produces `data/`, which is the dev
 server's public directory, including `scripts.json` (the Commander Wars scripts,

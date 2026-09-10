@@ -61,6 +61,15 @@ export class VisionMap {
         }
       }
     }
+    // Share temporary reveals for the owner's remaining duration, like normal
+    // allied vision. CW's duration-minus-one copies expire on recomputation;
+    // owner-based expiry keeps visibility independent of update frequency.
+    for (const other of this.map.players) {
+      if (!player.isAlly(other)) continue;
+      for (const field of other.visionFields) {
+        grid[field.y * width + field.x] = field.visionType;
+      }
+    }
     this.grids.set(player.getPlayerID(), grid);
   }
 
@@ -106,6 +115,11 @@ export class VisionMap {
 
   getFieldVisible(player: Player, x: number, y: number): boolean {
     return this.getFieldVisibleType(player, x, y) === GameEnums.VisionType_Clear;
+  }
+
+  getFieldDirectVisible(player: Player, x: number, y: number): boolean {
+    return this.map.onMap(x, y) && this.map.players.some(other => player.isAlly(other)
+      && other.visionFields.some(field => field.x === x && field.y === y && field.directView));
   }
 
   /** The raw grid, for the renderer. */

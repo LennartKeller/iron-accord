@@ -1,6 +1,7 @@
 import { TILE_SIZE, tileSpritesAt, type Scene, type SceneSpriteRef } from '../maps/scene.ts';
 import { Camera } from './camera.ts';
 import { SpriteStore, type LoadedSprite } from './sprites.ts';
+import { movementDuration, sampleRoute, visibleMotionTile, type MotionPoint } from './motion.ts';
 
 /**
  * Canvas2D renderer for a Commander Wars scene.
@@ -26,10 +27,18 @@ export interface Highlight {
   alpha?: number;
 }
 
+export interface LiveUnit {
+  uid?: number;
+  x: number; y: number; owner: number; id: string; hasMoved: boolean;
+  sprites: Array<{ id: string; table?: string }>;
+  badges?: UnitBadges;
+}
+
 export class SceneRenderer {
   private readonly ctx: CanvasRenderingContext2D;
   private terrainLayer: HTMLCanvasElement | null = null;
   private dpr = 1;
+  private loadVersion = 0;
 
   scene: Scene | null = null;
   readonly camera: Camera;
@@ -38,6 +47,34 @@ export class SceneRenderer {
   /** Extra tinted tiles, e.g. a movement range. */
   highlights: Highlight[] = [];
   showGrid = false;
+  reducedMotion = false;
+  private motions: Array<{ uid: number; path: MotionPoint[]; unit: LiveUnit; start: number; duration: number }> = [];
+  private effects: Array<{ x: number; y: number; text: string; color: string; start: number; duration: number; stack: number }> = [];
+  private frameTime = 0;
+
+  get isAnimating(): boolean { return this.motions.length > 0 || this.effects.length > 0; }
+
+  clearAnimations(): void { this.motions = []; this.effects = []; }
+
+  /** A visual snapshot only: the game already holds the action's final state. */
+  animateMove(uid: number, path: readonly MotionPoint[], oldUnit?: LiveUnit, now = performance.now()): number {
+    const unit = oldUnit ?? this.liveUnits?.find(candidate => candidate.uid === uid);
+    const duration = this.reducedMotion ? 0 : movementDuration(path);
+    if (!unit || !duration) return 0;
+    this.motions = this.motions.filter(motion => motion.uid !== uid);
+    this.motions.push({ uid, path: path.map(point => ({ ...point })), unit: {
+      ...unit, sprites: unit.sprites.map(sprite => ({ ...sprite })),
+      badges: unit.badges ? { ...unit.badges, icons: [...unit.badges.icons] } : undefined,
+    }, start: now, duration });
+    return duration;
+  }
+
+  addEffect(x: number, y: number, text: string, color = '#ffffff', delayMs = 0, now = performance.now()): void {
+    const start = now + delayMs;
+    const stack = this.effects.filter(effect => effect.x === x && effect.y === y
+      && Math.abs(effect.start - start) < 200).length;
+    this.effects.push({ x, y, text, color, start, duration: this.reducedMotion ? 700 : 1000, stack });
+  }
 
   // Written out rather than declared as constructor parameter properties:
   // plain `node` type stripping erases the annotations but cannot generate the
@@ -67,15 +104,22 @@ export class SceneRenderer {
   }
 
   async load(scene: Scene): Promise<void> {
+    const version = ++this.loadVersion;
     this.scene = scene;
+    this.clearAnimations();
+    this.terrainLayer = null;
     this.selected = null;
     this.highlights = [];
     this.path = [];
     this.fog = null;
     this.visionOverlay = null;
     this.liveBuildings = null;
+    this.liveUnits = null;
     await this.sprites.preload(scene.spriteIds);
-    await this.bakeTerrain(scene);
+    if (version !== this.loadVersion) return;
+    const layer = await this.bakeTerrain(scene);
+    if (version !== this.loadVersion) return;
+    this.terrainLayer = layer;
     this.resize();
     this.camera.fit(this.worldWidth, this.worldHeight);
   }
@@ -129,7 +173,7 @@ export class SceneRenderer {
     }
   }
 
-  private async bakeTerrain(scene: Scene): Promise<void> {
+  private async bakeTerrain(scene: Scene): Promise<HTMLCanvasElement> {
     const layer = document.createElement('canvas');
     layer.width = scene.width * TILE_SIZE;
     layer.height = scene.height * TILE_SIZE;
@@ -148,10 +192,13 @@ export class SceneRenderer {
     }
     // Buildings are NOT baked in: capturing one changes its sprites, and a
     // static layer would keep showing the previous owner's colours.
-    this.terrainLayer = layer;
+    return layer;
   }
 
-  render(): void {
+  render(now = performance.now()): void {
+    this.frameTime = now;
+    this.motions = this.motions.filter(motion => now < motion.start + motion.duration);
+    this.effects = this.effects.filter(effect => now < effect.start + effect.duration);
     const { ctx, canvas, scene } = this;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -180,6 +227,7 @@ export class SceneRenderer {
     this.drawPath(ctx);
     if (this.showGrid) this.drawGrid(ctx, scene);
     this.drawSelection(ctx);
+    this.drawEffects(ctx, scene);
 
     ctx.restore();
   }
@@ -219,12 +267,7 @@ export class SceneRenderer {
    * a newly built unit type is not in the scene's palette at all, and deriving
    * ids from it left anything not already on the map invisible.
    */
-  liveUnits: Array<{
-    x: number; y: number; owner: number; id: string; hasMoved: boolean;
-    sprites: Array<{ id: string; table?: string }>;
-    /** Status icons: HP digit, low fuel, low ammo, capture, cargo. */
-    badges?: UnitBadges;
-  }> | null = null;
+  liveUnits: LiveUnit[] | null = null;
 
   private drawUnits(ctx: CanvasRenderingContext2D, scene: Scene): void {
     if (this.liveUnits) { this.drawLiveUnits(ctx, scene); return; }
@@ -247,6 +290,17 @@ export class SceneRenderer {
    */
   private drawLiveUnits(ctx: CanvasRenderingContext2D, _scene: Scene): void {
     for (const unit of this.liveUnits ?? []) {
+      if (this.motions.some(motion => motion.uid === unit.uid)) continue;
+      this.drawLiveUnit(ctx, unit);
+    }
+    for (const motion of this.motions) {
+      const sample = sampleRoute(motion.path, (this.frameTime - motion.start) / motion.duration);
+      if (!sample || !visibleMotionTile(sample.from, this.fog, _scene.width) || !visibleMotionTile(sample.to, this.fog, _scene.width)) continue;
+      this.drawLiveUnit(ctx, { ...motion.unit, ...sample.position, hasMoved: false });
+    }
+  }
+
+  private drawLiveUnit(ctx: CanvasRenderingContext2D, unit: LiveUnit): void {
       for (const layer of unit.sprites) {
         const sprite = this.peek(layer.id, layer.table);
         if (!sprite) continue;
@@ -257,6 +311,32 @@ export class SceneRenderer {
         ctx.restore();
       }
       if (unit.badges) this.drawBadges(ctx, unit.x, unit.y, unit.badges);
+  }
+
+  private drawEffects(ctx: CanvasRenderingContext2D, scene: Scene): void {
+    for (const effect of this.effects) {
+      if (this.frameTime < effect.start || !visibleMotionTile(effect, this.fog, scene.width)) continue;
+      const progress = (this.frameTime - effect.start) / effect.duration;
+      ctx.save();
+      if (!this.reducedMotion && progress < 0.2) {
+        ctx.globalAlpha = (1 - progress / 0.2) * 0.5;
+        ctx.fillStyle = effect.color;
+        ctx.fillRect(effect.x * TILE_SIZE, effect.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+      }
+      ctx.globalAlpha = this.reducedMotion ? 1 : Math.min(1, (1 - progress) * 3);
+      // Keep feedback readable at every zoom instead of scaling text with tiles.
+      ctx.font = `bold ${14 / this.camera.scale}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 3 / this.camera.scale;
+      ctx.strokeStyle = '#0d1117';
+      ctx.fillStyle = effect.color;
+      const x = (effect.x + 0.5) * TILE_SIZE;
+      const y = effect.y * TILE_SIZE + 3
+        - (effect.stack * 18 + (this.reducedMotion ? 0 : progress * 16)) / this.camera.scale;
+      ctx.strokeText(effect.text, x, y);
+      ctx.fillText(effect.text, x, y);
+      ctx.restore();
     }
   }
 

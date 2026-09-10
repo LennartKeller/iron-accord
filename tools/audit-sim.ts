@@ -50,6 +50,12 @@ for (const file of [...NAVAL_MAPS, ...LAND_MAPS]) {
     map.vision.update();
     const env = new GameEnvironment(map, registry, { maxDays: 30, maxFieldChoices: 6, rng, seed: 1 }, game);
     env.reset(1);
+    const step = env.step.bind(env);
+    env.step = action => {
+      const result = step(action);
+      if (!result.info.accepted) record(['Rejected action', JSON.stringify(action)]);
+      return result;
+    };
     await playMatch(env, [new HeuristicAgent(), new HeuristicAgent()], { maxSteps: 6000 });
     matches++;
   }
@@ -57,7 +63,7 @@ for (const file of [...NAVAL_MAPS, ...LAND_MAPS]) {
 
 const log = console.log;
 log(`\n${matches} matches played (whole suite, fog off and on).`);
-if (counts.size === 0) log('No swallowed failures.');
+if (counts.size === 0) log('No swallowed failures or rejected actions.');
 for (const [key, n] of [...counts].sort((a, b) => b[1] - a[1])) {
   log(`${String(n).padStart(6)}  ${key}`);
 }

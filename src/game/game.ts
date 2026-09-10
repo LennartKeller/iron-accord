@@ -108,6 +108,7 @@ export class Game {
     rules.onGameStart();
 
     this.beginTurn(this.currentPlayer);
+    this.map.vision.update();
   }
 
   get currentPlayer(): Player {
@@ -120,16 +121,29 @@ export class Game {
    * Builds a GameAction the way the engine does: the unit, where it came from,
    * and the path it would take. Action scripts read all of that.
    */
-  private buildAction(actionID: string, unit: Unit, destination: { x: number; y: number }): GameAction {
+  private buildAction(actionID: string, unit: Unit, destination: { x: number; y: number },
+                      range: MovementRange | null = this.range): GameAction {
     const action = new GameAction(this.map, actionID);
     action.setTargetUnit(unit);
     action.setTarget({ x: unit.x, y: unit.y });
-    const route = this.range ? pathTo(this.range, destination.x, destination.y) : [];
+    const route = range ? pathTo(range, destination.x, destination.y) : [];
     const points = route.length > 0
       ? route.map(tile => ({ x: tile.x, y: tile.y }))
       : [{ x: destination.x, y: destination.y }];
     action.setMovepath(points, route.at(-1)?.cost ?? 0);
     return action;
+  }
+
+  /** Validate at the execution boundary, including calls made without UI selection. */
+  private prepareAction(actionID: string, unit: Unit, destination: { x: number; y: number }): GameAction | null {
+    if (!this.canControl(unit) || !unit.getActionList().includes(actionID)
+        || !Number.isInteger(destination.x) || !Number.isInteger(destination.y)
+        || !this.map.onMap(destination.x, destination.y)) return null;
+    const range = computeMovementRange(this.map, unit);
+    if (!range.tiles.get(key(destination.x, destination.y))?.canAct) return null;
+    const action = this.buildAction(actionID, unit, destination, range);
+    try { return action.canBePerformed() ? action : null; }
+    catch (error) { console.warn(`canBePerformed ${actionID} failed`, error); return null; }
   }
 
   /**
@@ -168,28 +182,17 @@ export class Game {
     if (this.over) return false;               // a decided game is read-only
     const script = this.registry[actionID];
     if (!script?.perform) return false;
-    const action = this.buildAction(actionID, unit, destination);
+    const action = this.prepareAction(actionID, unit, destination);
+    if (!action) return false;
     configure?.(action);
 
-    try {
-      script.perform(action, this.map);
-    } catch (error) {
-      console.warn(`action ${actionID} failed`, error);
-      return false;
-    }
-    this.animations?.flush(this.map);
-
-    this.cleanupDead();
-    this.clearSelection();
-    this.map.vision.update();
-    this.checkGameOver();
-    return true;
+    return this.runPrepared(action, unit, destination);
   }
 
   // --- multi-step actions -------------------------------------------------
 
   /** An action mid-way through collecting its inputs. */
-  pending: { action: GameAction; unit: Unit; destination: { x: number; y: number } } | null = null;
+  pending: { action: GameAction; unit: Unit; destination: { x: number; y: number }; state?: ActionStep } | null = null;
 
   /**
    * What the driver needs next: a tile, a menu choice, or nothing (the action
@@ -240,15 +243,19 @@ export class Game {
    */
   beginAction(actionID: string, unit: Unit, destination: { x: number; y: number }): ActionStep {
     if (this.over) return { kind: 'invalid' }; // a decided game is read-only
-    const action = this.buildAction(actionID, unit, destination);
-    if (!action.canBePerformed()) return { kind: 'invalid' };
+    const action = this.prepareAction(actionID, unit, destination);
+    if (!action) return { kind: 'invalid' };
     this.pending = { action, unit, destination };
     return this.advance();
   }
 
   /** Supplies a chosen tile for a FIELD step. */
   provideField(x: number, y: number): ActionStep {
-    if (!this.pending) return { kind: 'invalid' };
+    if (!this.pending || !this.canControl(this.pending.unit)) return { kind: 'invalid' };
+    const state = this.pending.state;
+    if (state?.kind !== 'field' || !state.fields.some(field => field.x === x && field.y === y)) {
+      return { kind: 'invalid' };
+    }
     this.pending.action.writeDataInt32(x);
     this.pending.action.writeDataInt32(y);
     this.pending.action.setInputStep(this.pending.action.getInputStep() + 1);
@@ -256,11 +263,14 @@ export class Game {
   }
 
   /** Supplies a chosen menu entry. */
-  provideMenu(actionID: string, cost = 0): ActionStep {
-    if (!this.pending) return { kind: 'invalid' };
+  provideMenu(actionID: string, _cost = 0): ActionStep {
+    if (!this.pending || !this.canControl(this.pending.unit)) return { kind: 'invalid' };
+    const state = this.pending.state;
+    const entry = state?.kind === 'menu' ? state.entries.find(entry => entry.actionID === actionID) : undefined;
+    if (!entry) return { kind: 'invalid' };
     const action = this.pending.action;
     action.writeDataString(actionID);
-    action.setCosts(action.getCosts() + cost);
+    action.setCosts(action.getCosts() + entry.cost);
     action.setInputStep(action.getInputStep() + 1);
     return this.advance();
   }
@@ -276,7 +286,10 @@ export class Game {
     // Bounded: a script with no isFinalStep override would otherwise spin.
     for (let guard = 0; guard < 64; guard++) {
       const state = this.stepState(action);
-      if (state.kind !== 'done') return state;
+      if (state.kind !== 'done') {
+        this.pending.state = state;
+        return state;
+      }
 
       this.pending = null;
       const performed = this.runPrepared(action, unit, destination);
@@ -286,10 +299,52 @@ export class Game {
     return { kind: 'invalid' };
   }
 
+  /** Replace the planned action with CW's trap action at the first collision. */
+  private trapAction(action: GameAction): GameAction | null {
+    const unit = action.getTargetUnit();
+    const path = action.getMovePath();
+    if (!unit || path.length < 2) return null;
+    const costs = [0];
+    for (let i = 1; i < path.length; i++) {
+      const point = path[i];
+      const previous = path[i - 1];
+      const occupant = this.map.getUnitAt(point.x, point.y);
+      const step = unit.getMovementCosts(point.x, point.y, previous.x, previous.y);
+      const collision = occupant && occupant !== unit && unit.getOwner().isEnemyUnit(occupant)
+        && (!unit.getIgnoreUnitCollision() || i === path.length - 1);
+      if (collision || step < 0) {
+        // A preceding ally or zero-cost transit tile is not a legal stopping
+        // place. Back up to the last empty, occupiable tile (or the origin).
+        let stop = i - 1;
+        while (stop > 0) {
+          const at = path[stop];
+          const before = path[stop - 1];
+          if (!this.map.getUnitAt(at.x, at.y)
+              && unit.getMovementCosts(at.x, at.y, before.x, before.y) > 0) break;
+          stop--;
+        }
+        const trap = new GameAction(this.map, 'ACTION_TRAP');
+        trap.setTargetUnit(unit);
+        trap.setTarget(action.getTarget());
+        trap.setMovepath(path.slice(0, stop + 1), costs[stop]);
+        trap.writeDataInt32(point.x);
+        trap.writeDataInt32(point.y);
+        return trap;
+      }
+      costs.push(costs[i - 1] + step);
+    }
+    return null;
+  }
+
   /** Performs an action whose inputs are already in its buffer. */
   private runPrepared(action: GameAction, _unit: Unit, _destination: { x: number; y: number }): boolean {
+    action = this.trapAction(action) ?? action;
     const script = this.registry[action.getActionID()];
     if (!script?.perform) return false;
+    if (action.getActionID() === 'ACTION_TRAP') {
+      action.startReading();
+      this.currentPlayer.addVisionField(action.readDataInt32(), action.readDataInt32(), 1, true);
+    }
     try {
       script.perform(action, this.map);
     } catch (error) {
@@ -355,9 +410,18 @@ export class Game {
    * the fuel is charged for the move exactly as a normal move would.
    */
   moveForUnload(transport: Unit, x: number, y: number): boolean {
+    if (!this.canControl(transport)) return false;
     if (transport.x === x && transport.y === y) return true;
-    const tile = this.range?.tiles.get(key(x, y));
+    if (this.unloadOrigin) return false;
+    const range = computeMovementRange(this.map, transport);
+    const tile = range.tiles.get(key(x, y));
     if (!tile || !tile.canStop) return false;
+    const action = this.buildAction('ACTION_WAIT', transport, { x, y }, range);
+    const trap = this.trapAction(action);
+    if (trap) {
+      this.runPrepared(trap, transport, { x, y });
+      return false; // the unload is interrupted; this move cannot be cancelled
+    }
     // Remember where it came from: until a drop commits the unload, the move
     // is provisional. Without this a cancelled unload leaves the transport at
     // its destination, still unspent — free extra moves, once per cancel.
@@ -391,11 +455,13 @@ export class Game {
 
   /** Drops a carried unit onto a tile. The unit is spent for the turn. */
   unloadUnit(transport: Unit, cargoIndex: number, x: number, y: number): boolean {
+    if (!this.canControl(transport)) return false;
     const cargo = transport.loaded[cargoIndex];
     if (!cargo) return false;
     if (!this.unloadTargets(transport, cargoIndex).some(t => t.x === x && t.y === y)) return false;
 
     transport.unloadUnit(cargo, { x, y });
+    transport.hasMoved = true;
     // The drop commits the transport's move; it must not snap back now.
     this.unloadOrigin = null;
     this.map.vision.update();
@@ -424,6 +490,7 @@ export class Game {
   /** True when this tile can start production for the current player. */
   canProduceAt(x: number, y: number): boolean {
     if (this.over) return false;               // a decided game is read-only
+    if (!Number.isInteger(x) || !Number.isInteger(y) || !this.map.onMap(x, y)) return false;
     const building = this.map.getTerrain(x, y).getBuilding();
     if (!building || building.getOwner() !== this.currentPlayer) return false;
     if (this.map.getUnitAt(x, y)) return false;
@@ -440,6 +507,7 @@ export class Game {
    */
   buildUnit(x: number, y: number, unitID: string): boolean {
     if (this.over) return false;               // a decided game is read-only
+    if (!Number.isInteger(x) || !Number.isInteger(y) || !this.map.onMap(x, y)) return false;
     const building = this.map.getTerrain(x, y).getBuilding();
     const player = building?.getOwner();
     if (!building || player !== this.currentPlayer) return false;
@@ -554,7 +622,10 @@ export class Game {
    * the numbers written into the action, which is what the engine does too.
    */
   attack(unit: Unit, from: { x: number; y: number }, target: { x: number; y: number }): boolean {
-    const action = this.buildAction('ACTION_FIRE', unit, from);
+    const action = this.prepareAction('ACTION_FIRE', unit, from);
+    if (!action || !this.attackTargets(unit, from).some(tile => tile.x === target.x && tile.y === target.y)) return false;
+    const trap = this.trapAction(action);
+    if (trap) return this.runPrepared(trap, unit, from);
     const result = safeCall(() => this.registry.ACTION_FIRE?.calcBattleDamage(
       this.map, action, target.x, target.y, GameEnums.LuckDamageMode_On));
     if (!result) return false;
@@ -592,7 +663,8 @@ export class Game {
    */
   canControl(unit: Unit | null): unit is Unit {
     return this.over === null && unit !== null
-      && unit.getOwner() === this.currentPlayer && !unit.hasMoved;
+      && unit.getOwner() === this.currentPlayer && !unit.hasMoved
+      && this.map.units.includes(unit) && unit.getHp() > 0;
   }
 
   /**
@@ -632,11 +704,19 @@ export class Game {
     if (!unit || !range) return { moved: false, path: [], cost: 0, reason: 'not-your-unit' };
     if (unit.hasMoved) return { moved: false, path: [], cost: 0, reason: 'already-moved' };
 
-    const tile = range.tiles.get(key(x, y));
+    if (!this.canControl(unit)) return { moved: false, path: [], cost: 0, reason: 'not-your-unit' };
+    const currentRange = computeMovementRange(this.map, unit);
+    const tile = currentRange.tiles.get(key(x, y));
     if (!tile) return { moved: false, path: [], cost: 0, reason: 'unreachable' };
     if (!tile.canStop) return { moved: false, path: [], cost: 0, reason: 'occupied' };
 
-    const path = pathTo(range, x, y);
+    const path = pathTo(currentRange, x, y);
+    const trap = this.trapAction(this.buildAction('ACTION_WAIT', unit, { x, y }, currentRange));
+    if (trap) {
+      const cost = trap.getCosts();
+      const stoppedPath = path.slice(0, trap.getMovePathLength());
+      return { moved: this.runPrepared(trap, unit, { x, y }), path: stoppedPath, cost };
+    }
     unit.fuel = Math.max(0, unit.fuel - tile.cost);
     // Through moveUnitToField, not a bare x/y write: it resets capture
     // progress, which must not survive a move (see Unit.moveUnitToField). Only
@@ -652,7 +732,7 @@ export class Game {
 
   /** Marks the selected unit done without moving it. */
   waitSelected(): void {
-    if (!this.selected) return;
+    if (!this.canControl(this.selected)) return;
     this.selected.hasMoved = true;
     this.clearSelection();
   }
@@ -660,6 +740,7 @@ export class Game {
   endTurn(): void {
     if (this.over) return;
     this.cancelAction();
+    this.cancelUnloadMove();
     this.endOfTurn(this.currentPlayer);
     this.clearSelection();
     // Skip anyone already knocked out.
@@ -730,6 +811,7 @@ export class Game {
    * turn the constructor runs.
    */
   private beginTurn(player: Player, neutralTurn = true): void {
+    player.expireVisionFields();
     for (const unit of player.units) unit.hasMoved = false;
     player.funds += this.calcIncome(player);
 

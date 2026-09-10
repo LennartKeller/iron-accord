@@ -1,6 +1,9 @@
+import { TacticalPanel } from '../src/ui/tactical-panel.ts';
+import { captureFeedback } from '../src/ui/action-feedback.ts';
 import { SpriteStore } from '../src/render/sprites.ts';
 import { SceneRenderer } from '../src/render/renderer.ts';
 import { PointerControls } from '../src/input/pointer.ts';
+import { unitVisibleToViewer } from '../src/render/visibility.ts';
 import { terrainAt, type Scene } from '../src/maps/scene.ts';
 import { actionableTiles } from '../src/game/pathfinding.ts';
 import { assetFileName } from '../src/cw/assetname.ts';
@@ -53,6 +56,15 @@ const sprites = new SpriteStore(
   name => asset(`colortables/${assetFileName(name)}.png`),
 );
 const renderer = new SceneRenderer(canvas, sprites);
+const tacticalPanel = new TacticalPanel($('#tactical-panel'), sprites);
+tacticalPanel.colorTableForPlayer = index => scene?.players[index]?.colorTable;
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+renderer.reducedMotion = reducedMotion.matches;
+reducedMotion.addEventListener('change', event => {
+  renderer.reducedMotion = event.matches;
+  renderer.clearAnimations();
+  requestRender();
+});
 // Repaint once a sprite we needed mid-frame has decoded.
 renderer.onSpriteReady = () => requestRender();
 
@@ -110,7 +122,8 @@ function agentFor(seat: number): Agent {
 }
 /** Set while the AI is playing, so taps do not fight it for control. */
 let aiRunning = false;
-let aiCancelled = false;
+let sceneLoading = false;
+let sceneLoadVersion = 0;
 
 const options = { dimSpent: true };
 /** Config for the game currently being set up, then for the running game. */
@@ -137,7 +150,10 @@ function requestRender(): void {
   requestAnimationFrame(() => {
     frameQueued = false;
     renderer.camera.clampTo(renderer.worldWidth, renderer.worldHeight);
+    const wasAnimating = renderer.isAnimating;
     renderer.render();
+    if (renderer.isAnimating) requestRender();
+    else if (wasAnimating) syncTurn();
   });
 }
 
@@ -170,6 +186,7 @@ function isSpectating(): boolean {
  * hidden units included — onto the watching human's screen (fogViewerIndex).
  */
 function fogViewer() {
+  if (!game) return null;
   if (isSpectating()) {
     if (observerSeat === null) return null;   // omniscient
     return game!.map.players[observerSeat] ?? null;
@@ -185,6 +202,8 @@ function fogViewer() {
 
 /** Cycles omniscient -> seat 0 -> seat 1 -> ... -> omniscient. */
 function cycleObserver(): void {
+  renderer.clearAnimations();
+  tacticalPanel.hide();
   if (!isSpectating() || !game) return;
   observerSeat = nextObserverSeat(
     observerSeat,
@@ -257,13 +276,12 @@ function syncUnits(): void {
 
   const viewer = fogViewer();
   renderer.liveUnits = game.map.units
-    // Under fog a unit is only drawn where its tile is actually visible. The
-    // omniscient observer (null viewer) sees every unit, which is the point.
-    .filter(unit => !fogEnabled() || !viewer || viewer.getFieldVisible(unit.x, unit.y))
+    // Visibility includes status stealth even when map fog is switched off.
+    .filter(unit => unitVisibleToViewer(unit, viewer))
     .map(unit => {
       const table = scene!.players[unit.getOwner().getPlayerID()]?.colorTable;
       return {
-        x: unit.x, y: unit.y, id: unit.getUnitID(),
+        uid: unit.uid, x: unit.x, y: unit.y, id: unit.getUnitID(),
         owner: unit.getOwner().getPlayerID(),
         hasMoved: options.dimSpent && unit.hasMoved,
         sprites: unit.sprites.map(sprite => ({
@@ -314,7 +332,8 @@ function syncTurn(): void {
   const pending = game.pendingUnits().length;
   endTurnButton.textContent = 'End turn';
   nextUnitButton.hidden = false;
-  nextUnitButton.disabled = pending === 0 || aiRunning;
+  nextUnitButton.disabled = pending === 0 || aiRunning || renderer.isAnimating;
+  endTurnButton.disabled = aiRunning || sceneLoading || renderer.isAnimating;
   nextUnitButton.textContent = pending > 0 ? `Next (${pending})` : 'Next';
   syncObserver();
 }
@@ -337,6 +356,7 @@ function pendingInReadingOrder(): Unit[] {
  * view. Picking one up this way behaves exactly as tapping it does.
  */
 function cycleToNextUnit(): void {
+  if (renderer.isAnimating) return;
   if (!game || aiRunning) return;
   const pending = pendingInReadingOrder();
   if (pending.length === 0) return;
@@ -381,7 +401,13 @@ function showTargets(targets: Array<{ x: number; y: number; kind?: string }>): v
 }
 
 function describe(tile: { x: number; y: number } | null): void {
+  tacticalPanel.hide();
   if (!scene || !tile) { statusEl.textContent = '—'; return; }
+  const viewer = fogViewer();
+  if (fogEnabled() && viewer?.getFieldVisibleType(tile.x, tile.y) === GameEnums.VisionType_Shrouded) {
+    statusEl.textContent = `(${tile.x},${tile.y}) · Unexplored`;
+    return;
+  }
   const parts = [`(${tile.x},${tile.y})`, terrainAt(scene, tile.x, tile.y)];
   const building = game?.map.getTerrain(tile.x, tile.y).getBuilding();
   if (building) {
@@ -389,7 +415,8 @@ function describe(tile: { x: number; y: number } | null): void {
     parts.push(`${building.getBuildingID()}${owner ? ` P${owner.getPlayerID() + 1}` : ' neutral'}`);
   }
   const unit = game?.unitAt(tile.x, tile.y);
-  if (unit && (!fogEnabled() || game!.currentPlayer.getFieldVisible(tile.x, tile.y))) {
+  if (unit && unitVisibleToViewer(unit, viewer)) {
+    tacticalPanel.showUnit(game!, unit, tile);
     parts.push(`${unit.getUnitID()} P${unit.getOwner().getPlayerID() + 1}`);
     parts.push(`${Math.ceil(unit.getHp())}HP ${unit.fuel}F`);
     if (unit.getLoadedUnitCount() > 0) {
@@ -471,6 +498,7 @@ function closeMenu(): void {
 }
 
 function resetInteraction(): void {
+  tacticalPanel.hide();
   mode = 'idle';
   inspected = null;
   actor = null;
@@ -487,6 +515,32 @@ function resetInteraction(): void {
   renderer.path = [];
   renderer.selected = null;
   closeMenu();
+}
+
+/** Rules resolve synchronously; animation only interpolates their visible result. */
+function presentAction<T>(unit: Unit | null, to: { x: number; y: number } | null, run: () => T): T {
+  if (!game) return run();
+  const finish = captureFeedback(game, renderer.liveUnits ?? [], unit, to);
+  const result = run();
+  const feedback = finish();
+  syncBuildings();
+  syncUnits();
+  const viewer = fogViewer();
+  // Fog grids alone do not represent status/terrain stealth on clear tiles.
+  // Omit an enemy's disappearing route rather than exposing its hidden endpoint.
+  const motionVisible = feedback.movement && (!viewer
+    || feedback.movement.unit.owner === viewer.getPlayerID()
+    || renderer.liveUnits?.some(unit => unit.uid === feedback.movement!.uid));
+  const duration = motionVisible && feedback.movement
+    ? renderer.animateMove(feedback.movement.uid, feedback.movement.path, feedback.movement.unit) : 0;
+  for (const effect of feedback.effects) {
+    if (viewer && !viewer.getFieldVisible(effect.x, effect.y)) continue;
+    const occupant = game.map.getUnitAt(effect.x, effect.y);
+    if (occupant && !unitVisibleToViewer(occupant, viewer)) continue;
+    renderer.addEffect(effect.x, effect.y, effect.text, effect.color, duration);
+  }
+  requestRender();
+  return result;
 }
 
 // --- interaction ----------------------------------------------------------
@@ -519,7 +573,17 @@ function openActionMenu(screen: { x: number; y: number }): void {
 
 function beginUnload(index: number): void {
   if (!game || !actor || !destination) return;
-  if (!game.moveForUnload(actor, destination.x, destination.y)) { resetInteraction(); requestRender(); return; }
+  if (!presentAction(actor, destination, () => game!.moveForUnload(actor!, destination!.x, destination!.y))) {
+    // A trap commits a shorter move and spends the transport, while cancelling
+    // the planned unload. Refresh the board even though no drop can proceed.
+    resetInteraction();
+    syncBuildings();
+    syncUnits();
+    syncTurn();
+    checkBanner();
+    requestRender();
+    return;
+  }
 
   const targets = game.unloadTargets(actor, index);
   if (targets.length === 0) { resetInteraction(); requestRender(); return; }
@@ -550,7 +614,7 @@ function runAction(actionID: string): void {
 
   // Everything else goes through the generic multi-step driver: single-step
   // actions finish immediately, the rest ask for a tile or a menu choice.
-  handleStep(game.beginAction(actionID, actor, destination));
+  handleStep(presentAction(actor, destination, () => game!.beginAction(actionID, actor!, destination!)));
 }
 
 /** Presents whatever the action needs next, or finishes the turn action. */
@@ -571,7 +635,7 @@ function handleStep(step: ActionStep): void {
       const items: MenuItem[] = step.entries.map(entry => ({
         label: entry.text || entry.actionID,
         detail: entry.cost ? `${entry.cost}G` : undefined,
-        run: () => handleStep(game!.provideMenu(entry.actionID, entry.cost)),
+        run: () => handleStep(presentAction(actor, destination, () => game!.provideMenu(entry.actionID, entry.cost))),
       }));
       items.push({ label: '-' }, { label: 'Cancel', run: () => { game!.cancelAction(); resetInteraction(); requestRender(); } });
       const anchor = destination
@@ -591,6 +655,7 @@ let pickFields: Array<{ x: number; y: number }> = [];
 
 function afterTurnAction(): void {
   resetInteraction();
+  statusEl.textContent = 'Select a unit';
   syncBuildings();
   syncUnits();
   syncTurn();
@@ -613,25 +678,30 @@ const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms
  * responsive on large maps.
  */
 async function maybeRunAI(): Promise<void> {
-  if (!game || !env || aiRunning || game.over) return;
+  if (!game || !env || aiRunning || sceneLoading || game.over) return;
   if (!currentSeatIsAI()) return;
 
   aiRunning = true;
-  aiCancelled = false;
+  const runningGame = game;
+  const runningEnv = env;
+  const version = sceneLoadVersion;
+  const isCurrent = () => !sceneLoading && version === sceneLoadVersion && game === runningGame;
   endTurnButton.disabled = true;
   statusEl.textContent = `P${game.currentPlayerIndex + 1} is thinking…`;
 
   try {
     let guard = 0;
     let acting = -1;
-    while (!aiCancelled && game && !game.over && currentSeatIsAI() && guard++ < 500) {
+    while (isCurrent() && game && !game.over && currentSeatIsAI() && guard++ < 500) {
       const legal = enumerateActions(game, { maxFieldChoices: 8 });
       const seat = agentFor(game.currentPlayerIndex);
       if (acting !== game.currentPlayerIndex) {
         acting = game.currentPlayerIndex;
-        await seat.beginTurn?.(env);
+        await seat.beginTurn?.(runningEnv);
+        if (!isCurrent()) return;
       }
-      const chosen = await seat.selectAction(env, legal) ?? { kind: 'endTurn' as const };
+      const chosen = await seat.selectAction(runningEnv, legal) ?? { kind: 'endTurn' as const };
+      if (!isCurrent()) return;
 
       if (chosen.kind === 'endTurn') {
         lastCycledAt = null;
@@ -647,7 +717,8 @@ async function maybeRunAI(): Promise<void> {
 
       // If the chosen action is no longer legal, selecting again would return
       // the same one forever and hold the board hostage for guard x 160ms.
-      if (!applyAction(game, chosen)) {
+      if (!presentAction(chosen.kind === 'unit' ? game.map.getUnitByUid(chosen.uid) : null,
+        chosen.kind === 'unit' ? chosen.to : null, () => applyAction(game!, chosen))) {
         console.warn('AI proposed an action that could not be applied; ending its turn', chosen);
         game.endTurn();
         resetInteraction();
@@ -664,18 +735,20 @@ async function maybeRunAI(): Promise<void> {
       syncUnits();
       syncTurn();
       requestRender();
-      await wait(160);
+      do { await wait(40); } while (isCurrent() && renderer.isAnimating);
     }
   } finally {
     aiRunning = false;
-    endTurnButton.disabled = false;
-    checkBanner();
-    syncTurn();
-    // Clear the "thinking" line; the AI leaves no selection behind.
-    describe(renderer.selected);
-    requestRender();
+    if (!sceneLoading) {
+      endTurnButton.disabled = false;
+      checkBanner();
+      syncTurn();
+      // Clear the "thinking" line; the AI leaves no selection behind.
+      describe(renderer.selected);
+      requestRender();
+    }
     // Consecutive AI seats hand off to each other.
-    if (!aiCancelled && currentSeatIsAI() && game && !game.over) void maybeRunAI();
+    if (!sceneLoading && currentSeatIsAI() && game && !game.over) void maybeRunAI();
   }
 }
 
@@ -688,7 +761,8 @@ function openBuildMenu(screen: { x: number; y: number }, tile: { x: number; y: n
     detail: `${option.cost}G`,
     disabled: !option.affordable,
     run: () => {
-      game!.buildUnit(tile.x, tile.y, option.id);
+      const built = game!.buildUnit(tile.x, tile.y, option.id);
+      if (built) renderer.addEffect(tile.x, tile.y, 'DEPLOYED', '#85e5ac');
       afterTurnAction();
     },
   }));
@@ -720,7 +794,7 @@ function showThreatOf(tile: { x: number; y: number }): boolean {
   if (!game) return false;
   const unit = game.unitAt(tile.x, tile.y);
   if (!unit || !game.currentPlayer.isEnemy(unit.getOwner())) return false;
-  if (fogEnabled() && !game.currentPlayer.getFieldVisible(unit.x, unit.y)) return false;
+  if (!unitVisibleToViewer(unit, fogViewer())) return false;
 
   const threatened = threatenedTiles(game.map, unit);
   if (threatened.length === 0) return false;      // a transport has no weapon
@@ -735,7 +809,7 @@ function showThreatOf(tile: { x: number; y: number }): boolean {
 
 function onTap(screenX: number, screenY: number): void {
   // The board is read-only while the AI is thinking.
-  if (aiRunning) return;
+  if (aiRunning || sceneLoading || renderer.isAnimating) return;
   const tile = renderer.tileAt(screenX, screenY);
   if (!menuEl.hidden) { closeMenu(); if (mode === 'choosing') { resetInteraction(); requestRender(); } return; }
   if (!game || !tile) { renderer.selected = tile; describe(tile); requestRender(); return; }
@@ -744,8 +818,21 @@ function onTap(screenX: number, screenY: number): void {
     const targets = game.attackTargets(actor, destination);
     const hit = targets.find(t => t.x === tile.x && t.y === tile.y);
     if (hit) {
-      game.attack(actor, destination, { x: hit.x, y: hit.y });
-      afterTurnAction();
+      const attackingGame = game;
+      const attackingUnit = actor;
+      const from = { ...destination };
+      renderer.selected = { x: hit.x, y: hit.y };
+      tacticalPanel.showBattle(game, actor, from, hit, () => {
+        if (game !== attackingGame || !game.canControl(attackingUnit) || renderer.isAnimating) return;
+        presentAction(attackingUnit, from, () => game!.attack(attackingUnit, from, hit));
+        afterTurnAction();
+      }, () => {
+        tacticalPanel.hide();
+        statusEl.textContent = 'Pick a target';
+        requestRender();
+      });
+      tacticalPanel.element.querySelector<HTMLButtonElement>('.tactical-button--fire')?.focus({ preventScroll: true });
+      requestRender();
       return;
     }
     resetInteraction();
@@ -755,7 +842,7 @@ function onTap(screenX: number, screenY: number): void {
 
   if (mode === 'picking') {
     if (pickFields.some(f => f.x === tile.x && f.y === tile.y)) {
-      handleStep(game.provideField(tile.x, tile.y));
+      handleStep(presentAction(actor, destination, () => game!.provideField(tile.x, tile.y)));
     } else {
       game.cancelAction();
       resetInteraction();
@@ -765,7 +852,8 @@ function onTap(screenX: number, screenY: number): void {
   }
 
   if (mode === 'unloading' && actor && unloadIndex >= 0) {
-    if (game.unloadUnit(actor, unloadIndex, tile.x, tile.y)) {
+    if (presentAction(actor, { x: actor.x, y: actor.y }, () => game!.unloadUnit(actor!, unloadIndex, tile.x, tile.y))) {
+      renderer.addEffect(tile.x, tile.y, 'UNLOADED', '#85e5ac');
       actor.hasMoved = true;
       afterTurnAction();
       return;
@@ -809,7 +897,11 @@ function onTap(screenX: number, screenY: number): void {
 new PointerControls(canvas, renderer.camera, {
   onChange: () => { closeMenu(); requestRender(); },
   onTap,
-  onLongPress: () => { resetInteraction(); requestRender(); },
+  onLongPress: () => {
+    if (aiRunning || sceneLoading || renderer.isAnimating) return;
+    resetInteraction();
+    requestRender();
+  },
   onHover: (screenX, screenY) => {
     if (mode !== 'moving' || !game?.selected) return;
     const tile = renderer.tileAt(screenX, screenY);
@@ -819,7 +911,7 @@ new PointerControls(canvas, renderer.camera, {
 });
 
 endTurnButton.addEventListener('click', () => {
-  if (aiRunning) return;
+  if (aiRunning || sceneLoading || renderer.isAnimating) return;
   lastCycledAt = null;
   // Before the turn changes hands, not after: a half-entered unload must put
   // its transport back first, so end-of-turn hooks see it where it really is.
@@ -834,7 +926,13 @@ observerButton.addEventListener('click', cycleObserver);
 window.addEventListener('keydown', event => {
   if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
   // Ignore keys typed into the map search box.
-  if (event.target instanceof HTMLInputElement) return;
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+  if (event.key === 'Escape' && !picker.open && !setup.open && !settingsDialog.open) {
+    if (aiRunning || sceneLoading) return;
+    renderer.clearAnimations();
+    resetInteraction();
+    syncTurn(); requestRender(); event.preventDefault(); return;
+  }
   if (event.key === 'n' || event.key === 'N') { cycleToNextUnit(); event.preventDefault(); }
   if (event.key === 'v' || event.key === 'V') { cycleObserver(); event.preventDefault(); }
 });
@@ -862,102 +960,117 @@ $('#banner-close').addEventListener('click', () => { bannerEl.hidden = true; });
 // --- loading --------------------------------------------------------------
 
 async function loadScene(id: string): Promise<void> {
+  const version = ++sceneLoadVersion;
+  sceneLoading = true;
+  resetInteraction();
+  game = null;
+  env = null;
+  syncTurn();
   titleEl.textContent = 'loading…';
   const url = new URL(location.href);
   url.searchParams.set('map', id);
   history.replaceState(null, '', url);
 
-  scene = await (await fetch(asset(`scenes/${id}.json`))).json();
-  await renderer.load(scene!);
-  bannerEl.hidden = true;
-  resetInteraction();
+  try {
+    const loadedScene: Scene = await (await fetch(asset(`scenes/${id}.json`))).json();
+    if (version !== sceneLoadVersion) return;
+    scene = loadedScene;
+    await renderer.load(loadedScene);
+    if (version !== sceneLoadVersion) return;
+    bannerEl.hidden = true;
+    resetInteraction();
 
-  aiCancelled = true;
-  if (registry) {
-    config ??= defaultConfig(
-      scene!.players.length, scene!.players.map(p => p.army), scene!.players[0]?.funds ?? 0);
-    game = new Game(gameMapFromScene(scene!, registry, config), registry, animations,
-      { victoryRules: config.victoryRules });
-    // The script RNG must ride along: explore() rewinds it around simulated
-    // battles, and without it the AI's deliberation would consume the luck
-    // stream the real game draws from.
-    env = new GameEnvironment(game.map, registry,
-      { maxFieldChoices: 8, rng: rng ?? undefined }, game);
-  } else {
-    game = null;
-    env = null;
-    renderer.liveUnits = null;
-  }
-  syncBuildings();
-  syncUnits();
-  syncTurn();
-
-  titleEl.textContent = `${scene!.name}${scene!.author ? ` — ${scene!.author}` : ''}`;
-  statusEl.textContent = `${scene!.width}×${scene!.height} · ${scene!.players.length}P`;
-
-  // Debug affordances: ?select=x,y picks a unit up and ?to=x,y walks it to a
-  // destination and opens the action menu, so any board state is reproducible
-  // from a URL (and screenshottable headlessly).
-  const params = new URL(location.href).searchParams;
-  const select = parsePoint(params.get('select'));
-  if (game && select) {
-    renderer.selected = select;
-    const screenAt = (p: { x: number; y: number }) =>
-      renderer.camera.worldToScreen(p.x * 16 + 8, p.y * 16 + 8);
-
-    if (game.select(select.x, select.y)) {
-      mode = 'moving';
-      actor = game.selected;
-      showRange();
-    } else if (game.canProduceAt(select.x, select.y)) {
-      openBuildMenu(screenAt(select), select);
+    if (registry) {
+      config ??= defaultConfig(
+        scene!.players.length, scene!.players.map(p => p.army), scene!.players[0]?.funds ?? 0);
+      game = new Game(gameMapFromScene(scene!, registry, config), registry, animations,
+        { victoryRules: config.victoryRules });
+      // The script RNG must ride along: explore() rewinds it around simulated
+      // battles, and without it the AI's deliberation would consume the luck
+      // stream the real game draws from.
+      env = new GameEnvironment(game.map, registry,
+        { maxFieldChoices: 8, rng: rng ?? undefined }, game);
+    } else {
+      game = null;
+      env = null;
+      renderer.liveUnits = null;
     }
-    describe(select);
+    syncBuildings();
+    syncUnits();
+    syncTurn();
 
-    // ?build=UNIT_ID produces a unit at the selected building, for reproducing
-    // a board state (and for checking that fresh artwork appears without an
-    // extra interaction).
-    const buildId = params.get('build');
-    if (buildId && game.canProduceAt(select.x, select.y)) {
-      game.buildUnit(select.x, select.y, buildId);
-      closeMenu();
-      syncBuildings();
-      syncUnits();
-      syncTurn();
-    }
+    titleEl.textContent = `${scene!.name}${scene!.author ? ` — ${scene!.author}` : ''}`;
+    statusEl.textContent = `${scene!.width}×${scene!.height} · ${scene!.players.length}P`;
 
-    const to = parsePoint(params.get('to'));
-    if (to && actor) {
-      destination = to;
-      renderer.path = game.previewPath(to.x, to.y);
-      renderer.selected = to;
+    // Debug affordances: ?select=x,y picks a unit up and ?to=x,y walks it to a
+    // destination and opens the action menu, so any board state is reproducible
+    // from a URL (and screenshottable headlessly).
+    const params = new URL(location.href).searchParams;
+    const select = parsePoint(params.get('select'));
+    if (game && select) {
+      renderer.selected = select;
+      const screenAt = (p: { x: number; y: number }) =>
+        renderer.camera.worldToScreen(p.x * 16 + 8, p.y * 16 + 8);
 
-      // ?do=ACTION_ID performs the action instead of opening the menu.
-      const perform = params.get('do');
-      if (perform) {
-        // ?repeat=N performs the action N times, refreshing the unit between —
-        // a capture needs two ticks before the building changes hands.
-        const repeat = Math.max(1, Math.min(Number(params.get('repeat')) || 1, 10));
-        for (let i = 0; i < repeat; i++) {
-          if (i > 0) {
-            actor.hasMoved = false;
-            game.select(actor.x, actor.y);
-            destination = { x: actor.x, y: actor.y };
-          }
-          game.performAction(perform, actor, destination ?? to);
-        }
+      if (game.select(select.x, select.y)) {
+        mode = 'moving';
+        actor = game.selected;
+        showRange();
+      } else if (game.canProduceAt(select.x, select.y)) {
+        openBuildMenu(screenAt(select), select);
+      }
+      describe(select);
+
+      // ?build=UNIT_ID produces a unit at the selected building, for reproducing
+      // a board state (and for checking that fresh artwork appears without an
+      // extra interaction).
+      const buildId = params.get('build');
+      if (buildId && game.canProduceAt(select.x, select.y)) {
+        game.buildUnit(select.x, select.y, buildId);
         closeMenu();
         syncBuildings();
         syncUnits();
         syncTurn();
-        renderer.path = [];
-      } else {
-        openActionMenu(screenAt(to));
+      }
+
+      const to = parsePoint(params.get('to'));
+      if (to && actor) {
+        destination = to;
+        renderer.path = game.previewPath(to.x, to.y);
+        renderer.selected = to;
+
+        // ?do=ACTION_ID performs the action instead of opening the menu.
+        const perform = params.get('do');
+        if (perform) {
+          // ?repeat=N performs the action N times, refreshing the unit between —
+          // a capture needs two ticks before the building changes hands.
+          const repeat = Math.max(1, Math.min(Number(params.get('repeat')) || 1, 10));
+          for (let i = 0; i < repeat; i++) {
+            if (i > 0) {
+              actor.hasMoved = false;
+              game.select(actor.x, actor.y);
+              destination = { x: actor.x, y: actor.y };
+            }
+            game.performAction(perform, actor, destination ?? to);
+          }
+          closeMenu();
+          syncBuildings();
+          syncUnits();
+          syncTurn();
+          renderer.path = [];
+        } else {
+          openActionMenu(screenAt(to));
+        }
       }
     }
+    requestRender();
+  } finally {
+    if (version === sceneLoadVersion) {
+      sceneLoading = false;
+      endTurnButton.disabled = aiRunning;
+      void maybeRunAI();
+    }
   }
-  requestRender();
-  void maybeRunAI();
 }
 
 let index: IndexEntry[] = [];
@@ -1280,6 +1393,10 @@ $<HTMLInputElement>('#optDim').addEventListener('change', e => {
   requestRender();
 });
 window.addEventListener('resize', () => { renderer.resize(); requestRender(); });
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--tactical-bottom',
+    `${window.innerHeight - $('.bar--bottom').getBoundingClientRect().top + 12}px`);
+}).observe($('.bar--bottom'));
 
 async function main(): Promise<void> {
   const initial = new URL(location.href).searchParams;

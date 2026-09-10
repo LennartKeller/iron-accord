@@ -50,10 +50,11 @@ export interface EnvironmentOptions extends EnumerateOptions {
  * games — property count and army value.
  */
 export function defaultReward(before: GameState, after: GameState, player: number): number {
+  const team = before.players[player]?.team;
   const armyValue = (state: GameState) =>
-    state.units.filter(u => u.owner === player).reduce((sum, u) => sum + u.hp, 0);
+    state.units.filter(u => state.players[u.owner]?.team === team).reduce((sum, u) => sum + u.hp, 0);
   const enemyValue = (state: GameState) =>
-    state.units.filter(u => u.owner !== player).reduce((sum, u) => sum + u.hp, 0);
+    state.units.filter(u => state.players[u.owner]?.team !== team).reduce((sum, u) => sum + u.hp, 0);
   const properties = (state: GameState) =>
     state.buildings.filter(b => b.owner === player).length;
 
@@ -116,13 +117,13 @@ export class GameEnvironment {
   }
 
   legalActions(): ActionDescriptor[] {
-    return enumerateActions(this.game, this.options);
+    return this.done ? [] : enumerateActions(this.game, this.options);
   }
 
   step(action: ActionDescriptor): StepResult {
     const player = this.game.currentPlayerIndex;
     const before = snapshot(this.game);
-    const accepted = applyAction(this.game, action);
+    const accepted = !this.done && applyAction(this.game, action);
     const after = snapshot(this.game);
     this.stepCount++;
 

@@ -88,7 +88,7 @@ export class Belief {
     for (const other of map.players) {
       if (!this.player.isEnemy(other)) continue;
       for (const unit of other.units) {
-        if (!this.visible(unit.x, unit.y)) continue;
+        if (unit.isStealthed(this.player)) continue;
         this.memory.set(unit.uid, {
           uid: unit.uid, unitID: unit.getUnitID(), owner: other.getPlayerID(),
           x: unit.x, y: unit.y, hp: unit.getHp(), seen: true, age: 0,

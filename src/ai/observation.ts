@@ -133,13 +133,13 @@ export class ObservationEncoder {
       for (let x = 0; x < width; x++) {
         const terrain = game.map.getTerrain(x, y);
 
-        const terrainChannel = this.terrainIndex.get(terrain.getTerrainID());
-        if (terrainChannel !== undefined) planes[at(terrainChannel, x, y)] = 1;
-
         const visible = !fogOn || !viewer
           || viewer.getFieldVisibleType(x, y) === GameEnums.VisionType_Clear;
         const shrouded = fogOn && viewer
           && viewer.getFieldVisibleType(x, y) === GameEnums.VisionType_Shrouded;
+
+        const terrainChannel = this.terrainIndex.get(terrain.getTerrainID());
+        if (!shrouded && terrainChannel !== undefined) planes[at(terrainChannel, x, y)] = 1;
 
         planes[at(base + 10, x, y)] = visible ? 1 : 0;
         planes[at(base + 11, x, y)] = shrouded ? 1 : 0;
@@ -157,7 +157,7 @@ export class ObservationEncoder {
         }
 
         const unit = game.map.getUnitAt(x, y);
-        if (!unit || !visible) continue;
+        if (!unit || (viewer && unit.isStealthed(viewer))) continue;
 
         const channel = this.unitIndex.get(unit.getUnitID());
         if (channel !== undefined) planes[at(terrainCount + channel, x, y)] = 1;
@@ -182,7 +182,8 @@ export class ObservationEncoder {
       viewer ? Math.min(viewer.funds / 50_000, 1) : 0,
       Math.min(game.day / 100, 1),
       Math.min((viewer?.units.length ?? 0) / 50, 1),
-      Math.min(enemies.reduce((sum, p) => sum + p.units.length, 0) / 50, 1),
+      Math.min(enemies.reduce((sum, p) => sum
+        + p.units.filter(unit => !viewer || !unit.isStealthed(viewer)).length, 0) / 50, 1),
       totalIncome > 0 ? myIncome / totalIncome : 0,
     ]);
 

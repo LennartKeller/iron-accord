@@ -230,8 +230,10 @@ export class NormalAi implements Agent {
 
   /** Is `actionId` offered to this unit at this tile? */
   private canPerform(game: Game, unit: Unit, at: Point, actionId: string): boolean {
-    if (!game.select(unit.x, unit.y)) return false;
-    const offered = game.availableActions(unit, at).some(option => option.id === actionId);
+    const range = game.select(unit.x, unit.y);
+    if (!range) return false;
+    const offered = range.tiles.get(`${at.x},${at.y}`)?.canAct === true
+      && game.availableActions(unit, at).some(option => option.id === actionId);
     game.clearSelection();
     return offered;
   }
@@ -422,7 +424,7 @@ export class NormalAi implements Agent {
     let highestCount = 0;
 
     for (const tile of range.tiles.values()) {
-      if (tile.cost > data.movementPoints + 1) continue;
+      if (tile.cost > data.movementPoints) continue;
       if (game.map.getTerrain(tile.x, tile.y).getUnit() !== null) continue;
       let count = 0;
       let lastNeedy: Point | null = null;
@@ -969,7 +971,9 @@ export class NormalAi implements Agent {
 
       const { targets, moveTargetFields } = getAttackTargets(
         game, this.core!.predictor, unit, data.range, this.targetOptions(),
-        data.movementPoints + 1);
+        // The influence range covers multiple turns. Execution includes its
+        // movement budget boundary, so one extra point permits illegal moves.
+        data.movementPoints);
       const index = getBestAttackTarget(
         context, data, targets, moveTargetFields, buildings, enemyBuildings);
       if (index < 0) continue;
@@ -1211,7 +1215,7 @@ export class NormalAi implements Agent {
     if (data.range === null) return null;
     const { targets, moveTargetFields } = getBestTarget(
       game, this.core!.predictor, unit, data.range, this.targetOptions(),
-      data.movementPoints + 1);
+      data.movementPoints);
     if (targets.length === 0) return null;
     if (targets[0].z < -unit.getCoUnitValue() * this.config.minSuicideDamage) return null;
     const pick = this.randomIndex(targets.length);

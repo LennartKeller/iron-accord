@@ -43,12 +43,18 @@ export class ScriptVariables {
   /** For snapshotting. */
   toJSON(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
-    for (const [id, variable] of this.variables) out[id] = variable.readValue();
+    for (const [id, variable] of this.variables) {
+      // Define keys explicitly so even "__proto__" remains ordinary script data.
+      Object.defineProperty(out, id, {
+        value: structuredClone(variable.readValue()), enumerable: true,
+        configurable: true, writable: true,
+      });
+    }
     return out;
   }
 
   fromJSON(data: Record<string, unknown>): void {
     this.clear();
-    for (const [id, value] of Object.entries(data)) this.createVariable(id).writeValue(value);
+    for (const [id, value] of Object.entries(data)) this.createVariable(id).writeValue(structuredClone(value));
   }
 }

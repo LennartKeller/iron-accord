@@ -75,7 +75,10 @@ export class GameAction {
   getMovementTarget(): Unit | null {
     const at = this.getActionTarget();
     const occupant = this.map.getUnitAt(at.x, at.y);
-    return occupant && occupant !== this.unit ? occupant : null;
+    // Menus must see the same apparent occupancy as movement range. Actual
+    // hidden collisions are intercepted by Game before any action performs.
+    return occupant && occupant !== this.unit
+      && !occupant.isStealthed(this.unit?.getOwner() ?? this.map.getCurrentPlayer()) ? occupant : null;
   }
 
   getMovementBuilding(): Building | null {

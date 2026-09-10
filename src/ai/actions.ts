@@ -149,6 +149,7 @@ export function enumerateActions(game: Game, options: EnumerateOptions = {}): Ac
 
 /** Applies a descriptor. Returns false if it is no longer legal. */
 export function applyAction(game: Game, action: ActionDescriptor): boolean {
+  if (game.over) return false;
   switch (action.kind) {
     case 'endTurn':
       game.endTurn();

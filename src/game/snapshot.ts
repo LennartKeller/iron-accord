@@ -1,5 +1,6 @@
-import { GameMap, Unit, BuildingHost } from '../host/index.ts';
+import { GameMap, Unit, BuildingHost, Terrain } from '../host/index.ts';
 import type { Game } from './game.ts';
+import type { VisionField } from '../host/player.ts';
 
 /**
  * Full game state, captured as plain data.
@@ -28,6 +29,15 @@ export interface UnitState {
   capturePoints: number;
   hidden: boolean;
   rank: number;
+  cloaked: boolean;
+  coUnit: number;
+  customName: string;
+  aiMode: number;
+  aiPriority: number;
+  offensiveBonus: Unit['offensiveBonus'];
+  defensiveBonus: Unit['defensiveBonus'];
+  movementBonus: Unit['movementBonus'];
+  visionBonus: Unit['visionBonus'];
   variables: Record<string, unknown>;
   loaded: UnitState[];
 }
@@ -39,6 +49,7 @@ export interface BuildingState {
   owner: number;
   hp: number;
   fireCount: number;
+  variables: Record<string, unknown>;
 }
 
 export interface PlayerState {
@@ -46,6 +57,7 @@ export interface PlayerState {
   team: number;
   funds: number;
   isDefeated: boolean;
+  visionFields: VisionField[];
 }
 
 export interface GameState {
@@ -58,33 +70,45 @@ export interface GameState {
   victoryRules: Array<{ ruleID: string; variables: Record<string, unknown> }>;
   units: UnitState[];
   buildings: BuildingState[];
-  /**
-   * Destructible tiles only.
-   *
-   * The old comment here said terrain ids never change. They do: ACTION_FIRE
-   * does `defTerrain.setHp(getHp() - damage)` (ACTION_FIRE.js:833), and walls,
-   * meteors and destroyed pipes swap the tile outright via `replaceTerrainOnly`.
-   * `Game.attackTargets` offers `kind: 'terrain'`, and the planner explores real
-   * `applyAction` calls — so merely *considering* shooting a pipe seam used to
-   * damage it on the live board, permanently and with no log, and the damage
-   * grew with thinking time.
-   *
-   * Only tiles with `hp >= 0` are captured. Plain terrain leaves `hp` at its -1
-   * default (host/terrain.ts:48) and has nothing to restore, so this stays a
-   * handful of entries on the maps that have any and empty on the maps that
-   * do not — the sweep it rides along with is the one buildings already do.
-   */
+  /** Every tile: destroying a meteor also replaces indestructible plasma. */
   terrain: TerrainState[];
   /** Next unit identity to hand out; see GameMap.getUnitUidCounter. */
   unitUidCounter: number;
 }
 
-/** A destructible tile: what it was, and how intact. */
+/** Rules state for a tile and its nested base terrain. */
 export interface TerrainState {
   x: number;
   y: number;
   terrainID: string;
   hp: number;
+  palette: string;
+  visionHigh: number;
+  variables: Record<string, unknown>;
+  baseTerrain: TerrainState | null;
+}
+
+function captureTerrain(terrain: Terrain): TerrainState {
+  return {
+    x: terrain.x, y: terrain.y, terrainID: terrain.getTerrainID(), hp: terrain.hp,
+    palette: terrain.palette, visionHigh: terrain.visionHigh,
+    variables: terrain.variables.toJSON(),
+    baseTerrain: terrain.baseTerrain ? captureTerrain(terrain.baseTerrain) : null,
+  };
+}
+
+function restoreTerrain(map: GameMap, terrain: Terrain, state: TerrainState): void {
+  if (terrain.terrainID !== state.terrainID) terrain.terrainID = state.terrainID;
+  terrain.hp = state.hp;
+  terrain.palette = state.palette;
+  terrain.visionHigh = state.visionHigh;
+  terrain.variables.fromJSON(state.variables);
+  if (state.baseTerrain) {
+    if (!terrain.baseTerrain) {
+      terrain.baseTerrain = new Terrain(map, state.x, state.y, state.baseTerrain.terrainID);
+    }
+    restoreTerrain(map, terrain.baseTerrain, state.baseTerrain);
+  } else if (terrain.baseTerrain) terrain.baseTerrain = null;
 }
 
 function captureUnit(unit: Unit): UnitState {
@@ -102,6 +126,12 @@ function captureUnit(unit: Unit): UnitState {
     capturePoints: unit.getCapturePoints(),
     hidden: unit.hidden,
     rank: unit.rank,
+    cloaked: unit.cloaked, coUnit: unit.coUnit, customName: unit.customName,
+    aiMode: unit.aiMode, aiPriority: unit.aiPriority,
+    offensiveBonus: unit.offensiveBonus.map(entry => ({ ...entry })),
+    defensiveBonus: unit.defensiveBonus.map(entry => ({ ...entry })),
+    movementBonus: unit.movementBonus.map(entry => ({ ...entry })),
+    visionBonus: unit.visionBonus.map(entry => ({ ...entry })),
     variables: unit.variables.toJSON(),
     loaded: unit.loaded.map(captureUnit),
   };
@@ -114,9 +144,7 @@ export function snapshot(game: Game): GameState {
   for (let y = 0; y < map.height; y++) {
     for (let x = 0; x < map.width; x++) {
       const field = map.getTerrain(x, y);
-      if (field.getHp() >= 0) {
-        terrain.push({ x, y, terrainID: field.getTerrainID(), hp: field.getHp() });
-      }
+      terrain.push(captureTerrain(field));
       const building = field.getBuilding();
       if (!building) continue;
       buildings.push({
@@ -125,6 +153,7 @@ export function snapshot(game: Game): GameState {
         owner: building.getOwnerID(),
         hp: building.hp,
         fireCount: building.fireCount,
+        variables: building.variables.toJSON(),
       });
     }
   }
@@ -139,6 +168,7 @@ export function snapshot(game: Game): GameState {
       team: player.team,
       funds: player.funds,
       isDefeated: player.isDefeated,
+      visionFields: player.visionFields.map(field => ({ ...field })),
     })),
     // The defeat rules latch on and never off — victoryrule_nohq.js only
     // applies to a player who has ever owned an HQ — so a snapshot taken
@@ -166,6 +196,14 @@ function restoreUnit(map: GameMap, state: UnitState): Unit {
   unit.setCapturePoints(state.capturePoints);
   unit.hidden = state.hidden;
   unit.rank = state.rank;
+  unit.cloaked = state.cloaked;
+  unit.coUnit = state.coUnit;
+  unit.customName = state.customName;
+  unit.aiMode = state.aiMode;
+  unit.aiPriority = state.aiPriority;
+  for (const key of ['offensiveBonus', 'defensiveBonus', 'movementBonus', 'visionBonus'] as const) {
+    unit[key].splice(0, unit[key].length, ...state[key].map(entry => ({ ...entry })));
+  }
   unit.variables.fromJSON(state.variables);
   for (const carried of state.loaded) {
     // Carried units are not on the board, so build them without registering.
@@ -177,6 +215,9 @@ function restoreUnit(map: GameMap, state: UnitState): Unit {
 }
 
 export function restore(game: Game, state: GameState): void {
+  // Cancel provisional moves against the branch board before replacing it.
+  game.cancelAction();
+  game.cancelUnloadMove();
   const { map } = game;
 
   game.day = state.day;
@@ -193,6 +234,8 @@ export function restore(game: Game, state: GameState): void {
     player.team = playerState.team;
     player.funds = playerState.funds;
     player.isDefeated = playerState.isDefeated;
+    player.visionFields.splice(0, player.visionFields.length,
+      ...(playerState.visionFields ?? []).map(field => ({ ...field })));
     player.units.length = 0;
   });
 
@@ -201,19 +244,15 @@ export function restore(game: Game, state: GameState): void {
   map.units.length = 0;
   for (const unitState of state.units) restoreUnit(map, unitState);
 
-  // Terrain first: replacing a tile rebuilds the Terrain object and re-parents
-  // whatever building sits on it, so doing it after the building pass would
-  // hand the restored building to a discarded tile.
+  // Restore all tiles, including plasma and other non-destructible terrain
+  // affected by scripted destruction. Also remove buildings created in a branch.
+  const buildingTiles = new Set(state.buildings.map(building => `${building.x},${building.y}`));
   for (const terrainState of state.terrain) {
     const field = map.getTerrain(terrainState.x, terrainState.y);
-    if (!field) continue;
-    if (field.getTerrainID() !== terrainState.terrainID) {
-      map.replaceTerrainOnly(terrainState.terrainID, terrainState.x, terrainState.y);
-    }
-    map.getTerrain(terrainState.x, terrainState.y).setHp(terrainState.hp);
+    restoreTerrain(map, field, terrainState);
+    if (field.building && !buildingTiles.has(`${terrainState.x},${terrainState.y}`)) field.building = null;
   }
 
-  // Buildings are placed by the map; only ownership and condition are restored.
   for (const buildingState of state.buildings) {
     const terrain = map.getTerrain(buildingState.x, buildingState.y);
     let building = terrain.getBuilding();
@@ -226,6 +265,7 @@ export function restore(game: Game, state: GameState): void {
     building.setOwner(buildingState.owner >= 0 ? map.getPlayer(buildingState.owner) ?? null : null);
     building.hp = buildingState.hp;
     building.fireCount = buildingState.fireCount;
+    building.variables.fromJSON(buildingState.variables);
   }
 
   // After the units, because restoreUnit's assignUnitUid raises the counter to
@@ -238,7 +278,7 @@ export function restore(game: Game, state: GameState): void {
   // are only reproducible with it set. New data never needs it, and correctness
   // is the default: without the rewind, a search that imagines building a unit
   // permanently shifts the identity of the next one the game really builds.
-  if (!process.env.IRON_ACCORD_LEGACY_UIDS) {
+  if (typeof process === 'undefined' || !process.env.IRON_ACCORD_LEGACY_UIDS) {
     map.setUnitUidCounter(state.unitUidCounter);
   }
 

@@ -3,16 +3,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 
-/** Folds a directory's contents into a hash, in a filesystem-order-independent way. */
-function hashDirectory(dir: string, hash: crypto.Hash): void {
-  const entries = fs.readdirSync(dir, { withFileTypes: true })
-    .sort((a, b) => a.name.localeCompare(b.name));
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    hash.update(entry.name);
-    if (entry.isDirectory()) hashDirectory(full, hash);
-    else hash.update(fs.readFileSync(full));
-  }
+/** Only generated runtime assets belong in the site; data/ also holds training runs. */
+const runtimeEntries = ['scripts.json', 'scenes', 'sprites', 'colortables'];
+
+function runtimeDataAssets(): Plugin {
+  return {
+    name: 'iron-accord:runtime-data',
+    apply: 'build',
+    generateBundle() {
+      const emit = (relative: string): void => {
+        const full = path.resolve('data', relative);
+        if (!fs.existsSync(full)) return;
+        if (fs.statSync(full).isDirectory()) {
+          for (const name of fs.readdirSync(full).sort()) emit(`${relative}/${name}`);
+        } else {
+          this.emitFile({ type: 'asset', fileName: relative, source: fs.readFileSync(full) });
+        }
+      };
+      for (const entry of runtimeEntries) emit(entry);
+    },
+  };
 }
 
 /**
@@ -55,8 +65,6 @@ function pwaAssets(): Plugin {
         hash.update(contents);
       }
 
-      const dataDir = path.resolve('data');
-      if (fs.existsSync(dataDir)) hashDirectory(dataDir, hash);
       const buildId = hash.digest('hex').slice(0, 12);
 
       for (const [entry, contents] of sources) {
@@ -106,7 +114,7 @@ export default defineConfig({
   base: process.env.IRON_ACCORD_BASE ?? '/',
   root: 'web',
   publicDir: '../data',
-  plugins: [pwaAssets(), valueNetAssets()],
+  plugins: [runtimeDataAssets(), valueNetAssets(), pwaAssets()],
   // Left to the dependency pre-bundler, onnxruntime-web's internal URL for its
   // .wasm is not rewritten, so dev fetches it from a path that falls through to
   // index.html and the runtime reports "no available backend". Excluded, Vite
@@ -116,5 +124,5 @@ export default defineConfig({
     host: true,
     fs: { allow: ['..'] },
   },
-  build: { outDir: '../dist', emptyOutDir: true },
+  build: { outDir: '../dist', emptyOutDir: true, copyPublicDir: false },
 });

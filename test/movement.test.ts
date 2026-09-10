@@ -100,6 +100,17 @@ describe('movement rules', () => {
       expect(step).toBe(1);
     }
   });
+
+  it('rejects off-map coordinates that alias a reachable flat-array index', () => {
+    const { createMap } = bootstrap();
+    const board = createMap(3, 3, 'PLAINS');
+    const player = board.addPlayer('os');
+    const unit = board.addUnit('INFANTRY', player, 1, 1);
+    const range = computeMovementRange(board, unit);
+    expect(pathTo(range, 3, 0)).toEqual([]);
+    expect(pathTo(range, -1, 1)).toEqual([]);
+    expect(pathTo(range, 1.5, 1)).toEqual([]);
+  });
 });
 
 function findTerrain(map: GameMap, id: string): { x: number; y: number } | null {

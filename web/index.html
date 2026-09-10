@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#0d1117" />
   <title>Iron Accord</title>
   <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="./tactical-panel.css" />
   <!--
     These two are written as base-prefixed absolute paths on purpose. Given a
     relative href, Vite treats a manifest or icon link as an asset to
@@ -23,6 +24,7 @@
 </head>
 <body>
   <canvas id="stage"></canvas>
+  <aside id="tactical-panel" aria-label="Unit information"></aside>
 
   <header class="bar bar--top">
     <button id="pick" class="chip" type="button">Maps</button>

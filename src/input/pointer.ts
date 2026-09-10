@@ -28,6 +28,7 @@ interface TrackedPointer {
   startX: number;
   startY: number;
   moved: boolean;
+  tapEligible: boolean;
 }
 
 export class PointerControls {
@@ -58,6 +59,7 @@ export class PointerControls {
     element.addEventListener('pointerup', this.onPointerUp);
     element.addEventListener('pointercancel', this.onPointerUp);
     element.addEventListener('pointerleave', this.onPointerUp);
+    element.addEventListener('lostpointercapture', this.onPointerUp);
     element.addEventListener('wheel', this.onWheel, { passive: false });
     element.addEventListener('contextmenu', this.onContextMenu);
   }
@@ -65,12 +67,17 @@ export class PointerControls {
   dispose(): void {
     this.disposed = true;
     this.clearLongPress();
+    for (const id of this.pointers.keys()) {
+      if (this.element.hasPointerCapture?.(id)) this.element.releasePointerCapture(id);
+    }
+    this.pointers.clear();
     const { element } = this;
     element.removeEventListener('pointerdown', this.onPointerDown);
     element.removeEventListener('pointermove', this.onPointerMove);
     element.removeEventListener('pointerup', this.onPointerUp);
     element.removeEventListener('pointercancel', this.onPointerUp);
     element.removeEventListener('pointerleave', this.onPointerUp);
+    element.removeEventListener('lostpointercapture', this.onPointerUp);
     element.removeEventListener('wheel', this.onWheel);
     element.removeEventListener('contextmenu', this.onContextMenu);
   }
@@ -95,18 +102,25 @@ export class PointerControls {
   };
 
   private readonly onPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0) return;
     this.element.setPointerCapture(event.pointerId);
     const { x, y } = this.local(event);
-    this.pointers.set(event.pointerId, { id: event.pointerId, x, y, startX: x, startY: y, moved: false });
+    this.pointers.set(event.pointerId, {
+      id: event.pointerId, x, y, startX: x, startY: y, moved: false, tapEligible: true,
+    });
 
     if (this.pointers.size === 1) {
       this.clearLongPress();
       this.longPressTimer = window.setTimeout(() => {
         const pointer = this.pointers.get(event.pointerId);
-        if (pointer && !pointer.moved) this.options.onLongPress?.(pointer.x, pointer.y);
+        if (pointer && !pointer.moved && this.options.onLongPress) {
+          pointer.tapEligible = false;
+          this.options.onLongPress(pointer.x, pointer.y);
+        }
       }, this.longPressMs);
     } else {
       this.clearLongPress();
+      for (const pointer of this.pointers.values()) pointer.tapEligible = false;
     }
 
     if (this.pointers.size === 2) this.pinchDistance = this.currentPinchDistance();
@@ -123,6 +137,7 @@ export class PointerControls {
       return;
     }
     const { x, y } = this.local(event);
+    const oldCentre = this.pointers.size === 2 ? this.pinchCentre() : null;
     const dx = x - pointer.x;
     const dy = y - pointer.y;
     pointer.x = x;
@@ -145,11 +160,11 @@ export class PointerControls {
       const distance = this.currentPinchDistance();
       const centre = this.pinchCentre();
       if (this.pinchDistance > 0 && distance > 0) {
-        this.camera.zoomAt(centre.x, centre.y, distance / this.pinchDistance);
+        this.camera.zoomAt(oldCentre!.x, oldCentre!.y, distance / this.pinchDistance);
       }
       this.pinchDistance = distance;
       // Both fingers moving together still pans.
-      this.camera.panBy(dx / 2, dy / 2);
+      this.camera.panBy(centre.x - oldCentre!.x, centre.y - oldCentre!.y);
       this.changed();
     }
   };
@@ -164,10 +179,13 @@ export class PointerControls {
     }
 
     // A tap is a single pointer that never crossed the drag threshold.
-    if (!pointer.moved && this.pointers.size === 0 && !this.disposed) {
-      this.options.onTap?.(pointer.x, pointer.y);
+    const { x, y } = this.local(event);
+    if (event.type === 'pointerup' && pointer.tapEligible && !pointer.moved
+      && Math.hypot(x - pointer.startX, y - pointer.startY) <= this.dragThreshold
+      && this.pointers.size === 0 && !this.disposed) {
+      this.options.onTap?.(x, y);
     }
-    if (this.pointers.size < 2) this.pinchDistance = 0;
+    this.pinchDistance = this.pointers.size === 2 ? this.currentPinchDistance() : 0;
   };
 
   private readonly onWheel = (event: WheelEvent): void => {

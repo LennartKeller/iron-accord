@@ -90,4 +90,37 @@ describe('observation encoding', () => {
     expect(at(p2, 1, 2)).toBe(0);
     expect(at(p2, 2, 2)).toBe(1);
   });
+
+  it('does not leak hidden enemies through global unit counts', () => {
+    const map = scenario(GameEnums.Fog_OfWar);
+    map.addUnit('INFANTRY', map.getPlayer(0)!, 0, 2);
+    const game = new Game(map, registry, animations);
+    const encoder = ObservationEncoder.fromGame(game);
+    const before = encoder.encode(game, 0);
+    map.addUnit('LIGHT_TANK', map.getPlayer(1)!, 14, 2);
+    map.vision.update();
+    expect(encoder.encode(game, 0)).toEqual(before);
+  });
+
+  it('hides terrain that has not been revealed under shroud', () => {
+    const map = scenario(GameEnums.Fog_OfShroud);
+    map.addUnit('INFANTRY', map.getPlayer(0)!, 0, 2);
+    const game = new Game(map, registry, animations);
+    const encoder = ObservationEncoder.fromGame(game);
+    const before = encoder.encode(game, 0);
+    map.setTerrainID(14, 2, 'MOUNTAIN');
+    map.vision.update();
+    expect(encoder.encode(game, 0)).toEqual(before);
+  });
+
+  it('does not expose a stealthed unit on a visible tile', () => {
+    const map = scenario(GameEnums.Fog_Off);
+    map.addUnit('INFANTRY', map.getPlayer(0)!, 0, 2);
+    const enemy = map.addUnit('SUBMARINE', map.getPlayer(1)!, 14, 2);
+    enemy.hidden = true;
+    const game = new Game(map, registry, animations);
+    const encoder = ObservationEncoder.fromGame(game);
+    expect(enemy.isStealthed(map.getPlayer(0)!)).toBe(true);
+    expect(unitMass(encoder.encode(game, 0).planes, encoder)).toBe(1);
+  });
 });

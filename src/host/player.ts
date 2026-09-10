@@ -10,8 +10,17 @@ export const RocketTarget_Money = 0;
 export const RocketTarget_HpLowMoney = 1;
 export const RocketTarget_HpHighMoney = 2;
 
+export interface VisionField {
+  x: number;
+  y: number;
+  duration: number;
+  directView: boolean;
+  visionType: number;
+}
+
 export class Player {
   readonly units: Unit[] = [];
+  readonly visionFields: VisionField[] = [];
   /** Lazy cache behind getAverageCost(); negative means "not computed yet". */
   private averageCosts = -1;
   funds = 0;
@@ -135,7 +144,8 @@ export class Player {
     return player !== null && player.getTeam() === this.team;
   }
   isEnemy(player: Player | null): boolean {
-    return player !== null && player.getTeam() !== this.team;
+    // Neutral buildings are enemies for capture and AI target selection.
+    return player === null || player.getTeam() !== this.team;
   }
   isEnemyUnit(unit: Unit): boolean { return this.isEnemy(unit.getOwner()); }
   getBaseGameInput() { return { getAiType: () => GameEnums.AiTypes_Human ?? 0 }; }
@@ -176,8 +186,30 @@ export class Player {
   getFundsModifier(): number { return this.fundsModifier; }
   swapCOs(): void {}
   setColor(color: string): void { this.color = color; }
-  addVisionField(): void {}
-  getFieldDirectVisible(x: number, y: number): boolean { return this.getFieldVisible(x, y); }
+  addVisionField(
+    x: number, y: number, duration = 1, directView = false,
+    visionType = GameEnums.VisionType_Clear,
+  ): void {
+    if (!this.map.onMap(x, y) || duration <= 0) return;
+    const existing = this.visionFields.find(field => field.x === x && field.y === y);
+    if (existing) {
+      existing.duration = Math.max(existing.duration, duration);
+      existing.directView ||= directView;
+      existing.visionType = visionType;
+    } else this.visionFields.push({ x, y, duration, directView, visionType });
+    this.map.vision.update();
+  }
+
+  /** Temporary reveals count down when their owner's next turn begins. */
+  expireVisionFields(): void {
+    for (let i = this.visionFields.length - 1; i >= 0; i--) {
+      if (--this.visionFields[i].duration <= 0) this.visionFields.splice(i, 1);
+    }
+  }
+
+  getFieldDirectVisible(x: number, y: number): boolean {
+    return this.map.vision.getFieldDirectVisible(this, x, y);
+  }
   setFunds(amount: number): void { this.funds = amount; }
   getMovementcostModifier(): number { return 0; }
   getWeatherMovementCostModifier(): number { return 0; }

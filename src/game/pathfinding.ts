@@ -15,7 +15,7 @@ export interface ReachableTile {
   y: number;
   /** Total movement points spent getting here. */
   cost: number;
-  /** True when the unit may finish its move here — the tile must be empty. */
+  /** True when the tile appears empty; hidden collisions resolve on execution. */
   canStop: boolean;
   /**
    * True when the tile is a legal *action* target, which includes tiles held by
@@ -142,7 +142,9 @@ export function computeMovementRange(
       if (existing < 0) reached.push(at);
       cost[at] = next;
       cameFrom[at] = index;
-      canStop[at] = occupant === null || occupant === unit ? 1 : 0;
+      // Do not disclose a hidden enemy through a hole in the movement overlay.
+      canStop[at] = occupant === null || occupant === unit
+        || occupant.isStealthed(unit.getOwner()) ? 1 : 0;
       frontier.push(at, next);
     }
   }
@@ -176,6 +178,8 @@ export function actionableTiles(range: MovementRange): ReachableTile[] {
 /** Reconstructs the route to a destination, starting at the unit's own tile. */
 export function pathTo(range: MovementRange, x: number, y: number): ReachableTile[] {
   const { cost, cameFrom, width } = range.raw;
+  if (!Number.isInteger(x) || !Number.isInteger(y)
+      || x < 0 || x >= width || y < 0 || y >= cost.length / width) return [];
   let cursor = y * width + x;
   if (cursor < 0 || cursor >= cost.length || cost[cursor] < 0) return [];
 

@@ -2,7 +2,7 @@ import type { GameMap } from './gamemap.ts';
 import type { Player } from './player.ts';
 import type { Terrain } from './terrain.ts';
 import type { QPoint } from './globals.ts';
-import { MAX_UNIT_HP } from './enums.ts';
+import { GameEnums, MAX_UNIT_HP } from './enums.ts';
 import { ScriptVariables } from './variables.ts';
 
 const clamp = (value: number, min: number, max: number) =>
@@ -640,6 +640,7 @@ export class Unit {
     if (ignoreOutOfVisionRange) return false;
     if (!this.map.onMap(this.x, this.y)) return false;
 
+    if (player.getFieldDirectVisible(this.x, this.y)) return false;
     if (!player.getFieldVisible(this.x, this.y)) return true;
 
     // game/unit.cpp:3599 — status stealth (dived sub, stealthed bomber) and
@@ -647,7 +648,8 @@ export class Unit {
     // reveals the unit either way. Without it a dived submarine could never
     // be depth-charged by the cruiser standing right next to it.
     if (this.isStatusStealthed()
-        || (this.useTerrainHide() && this.map.getTerrain(this.x, this.y).getVisionHide(player))) {
+        || (this.map.getGameRules().getFogMode() !== GameEnums.Fog_Off
+          && this.useTerrainHide() && this.map.getTerrain(this.x, this.y).getVisionHide(player))) {
       // game/unit.cpp:3603 — getSpCircle(1, 1): the four tiles at manhattan
       // distance 1. Any unit there that is Alliance_Friend to the checking
       // player reveals us — allies count, not just the player's own units.

@@ -1,0 +1,67 @@
+.tactical-panel {
+  position: fixed;
+  z-index: 12;
+  left: max(14px, env(safe-area-inset-left));
+  bottom: var(--tactical-bottom, calc(64px + env(safe-area-inset-bottom)));
+  width: 290px;
+  max-height: calc(100dvh - 180px);
+  overflow: auto;
+  padding: 16px;
+  color: #e8eef5;
+  background: linear-gradient(145deg, rgba(29, 40, 53, .98), rgba(13, 20, 29, .97));
+  border: 1px solid #415169;
+  border-top: 3px solid #86bbcb;
+  border-radius: 8px;
+  box-shadow: 0 10px 32px #0008;
+  font-variant-numeric: tabular-nums;
+  pointer-events: auto;
+}
+.tactical-panel--battle { width: 360px; border-top-color: #f1ae70; }
+.tactical-unit { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.tactical-portrait { flex: 0 0 54px; width: 54px; height: 54px; image-rendering: pixelated; background: #ffffff07; border-radius: 4px; }
+.tactical-unit-titles { min-width: 0; }
+.tactical-eyebrow { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #afc3d5; font-weight: 700; }
+.tactical-name { font-size: 17px; margin: 2px 0; line-height: 1.2; overflow-wrap: anywhere; }
+.tactical-owner { color: #9aadc0; font-size: 11px; }
+.tactical-stats, .tactical-forecast { display: grid; gap: 8px; margin: 14px 0 10px; }
+.tactical-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tactical-stat { background: #ffffff06; border: 1px solid #ffffff0c; padding: 7px 8px; border-radius: 4px; }
+.tactical-stat-label { font-size: 10px; color: #a7b6c7; }
+.tactical-stat-value { margin: 2px 0 0; font-size: 14px; font-weight: 700; }
+.tactical-stat--low .tactical-stat-value { color: #ffc08c; }
+.tactical-details { display: flex; gap: 4px 12px; flex-wrap: wrap; color: #b9c9d9; font-size: 11px; }
+.tactical-exchange { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+.tactical-exchange .tactical-unit { display: block; }
+.tactical-exchange .tactical-portrait { float: left; margin-right: 7px; width: 40px; height: 40px; }
+.tactical-exchange .tactical-name { font-size: 14px; }
+.tactical-exchange .tactical-eyebrow { font-size: 9px; }
+.tactical-environment { align-self: center; font-weight: 700; }
+.tactical-forecast { grid-template-columns: 1fr 1fr; }
+.tactical-note { color: #aebccc; font-size: 11px; margin: 10px 0; }
+.tactical-controls { display: flex; gap: 8px; }
+.tactical-button { flex: 1; min-height: 42px; border: 1px solid #586b80; border-radius: 4px; background: #263548; color: #edf3fa; font: inherit; font-weight: 700; cursor: pointer; }
+.tactical-button--fire { background: #f0ad72; color: #241b15; border-color: #ffd7b4; }
+.tactical-button:hover { filter: brightness(1.12); }
+.tactical-button:focus-visible { outline: 3px solid #a4d9ff; outline-offset: 3px; }
+.tactical-button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 600px) {
+  .tactical-panel { left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); width: auto; padding: 10px 12px; }
+  .tactical-panel:not(.tactical-panel--battle) { display: grid; grid-template-columns: 1fr 1.2fr; gap: 7px 10px; }
+  .tactical-panel:not(.tactical-panel--battle) .tactical-portrait { width: 40px; height: 40px; flex-basis: 40px; }
+  .tactical-panel:not(.tactical-panel--battle) .tactical-name { font-size: 14px; }
+  .tactical-stats { margin: 0; gap: 4px; align-self: center; }
+  .tactical-stat { padding: 5px; }
+  .tactical-stat-value { font-size: 12px; }
+  .tactical-details { grid-column: 1 / -1; }
+  .tactical-exchange { margin-top: 8px; }
+  .tactical-forecast { margin-top: 10px; gap: 5px; }
+}
+@media (max-width: 600px) {
+  .bar--bottom { flex-wrap: wrap; gap: 6px; padding-left: 8px; padding-right: 8px; }
+  .bar--bottom .spacer { display: none; }
+  .bar--bottom .turn { margin-right: auto; font-size: 12px; }
+  .bar--bottom .chip { white-space: nowrap; padding: 8px 10px; min-height: 40px; font-size: 12px; }
+  .bar--bottom .status { flex-basis: 100%; order: 2; font-size: 11px; }
+  .bar--bottom #fit { display: none; }
+  body:has(.tactical-panel:not([hidden])) .bar--bottom .status { display: none; }
+}

@@ -19,6 +19,19 @@ function scenario(fog: number) {
 }
 
 describe('Belief', () => {
+  it('does not discover a stealthed enemy on a visible tile', () => {
+    const map = scenario(GameEnums.Fog_Off);
+    const me = map.getPlayer(0)!;
+    map.addUnit('INFANTRY', me, 0, 2);
+    const enemy = map.addUnit('SUBMARINE', map.getPlayer(1)!, 14, 2);
+    enemy.hidden = true;
+    const game = new Game(map, registry, animations);
+    const belief = new Belief(me);
+    belief.observe(game);
+    expect(me.getFieldVisible(14, 2)).toBe(true);
+    expect(belief.known()).toEqual([]);
+  });
+
   it('sees only what the player can see', () => {
     const map = scenario(GameEnums.Fog_OfWar);
     const me = map.getPlayer(0)!;

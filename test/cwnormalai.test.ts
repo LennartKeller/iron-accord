@@ -9,8 +9,9 @@ import { GameEnvironment } from '../src/ai/environment.ts';
 import { playMatch, RandomAgent } from '../src/ai/agent.ts';
 import { NormalAi } from '../src/ai/cw/normalai.ts';
 import { HeuristicAgent } from '../src/ai/heuristic.ts';
+import { BuildingHost } from '../src/host/building.ts';
 
-const { registry, rng } = bootstrap();
+const { registry, rng, createMap } = bootstrap();
 const LAND = 'maps/2_player/60-ZWEITER KRIEG.map';
 
 function environment(seed = 1): GameEnvironment {
@@ -59,6 +60,14 @@ describe('NormalAi', () => {
   it('plays a full match against a random agent and wins on material', async () => {
     const env = environment(5);
     const ai = new NormalAi({ seed: 5 });
+    // Fail at the first illegal proposal instead of looping thousands of times
+    // on the same unreachable firing position.
+    const step = env.step.bind(env);
+    env.step = action => {
+      const result = step(action);
+      expect(result.info.accepted, JSON.stringify(action)).toBe(true);
+      return result;
+    };
     const result = await playMatch(env, [ai, new RandomAgent(9)], { maxSteps: 6000 });
 
     expect(result.reason).not.toBe('step-limit');
@@ -95,27 +104,48 @@ describe('NormalAi', () => {
     expect(kinds.size).toBeGreaterThanOrEqual(3);
   });
 
-  it('degenerates to infantry-only if rebuilt every turn', async () => {
-    // The production system opens with six infantry and then works toward a
-    // composition, so the agent MUST be kept across turns. A caller that
-    // rebuilds it per turn resets that opening batch forever and buys nothing
-    // else -- which is exactly what a mismatched cache key did in the web app.
-    // This pins the invariant so the next caller to hold it wrongly has a test
-    // telling them why.
-    const env = environment(3);
-    const fresh = {
-      name: 'rebuilt-every-turn',
-      selectAction: (e: GameEnvironment) => new NormalAi({ seed: 3 }).selectAction(e),
+  it('finishes its six-unit opening across turns instead of restarting it', async () => {
+    // Isolate production from combat, casualties, captured airports and funds.
+    // Each day offers one empty factory; earlier purchases stay in the army
+    // but are parked and spent so movement cannot change the production mix.
+    const purchases = async (recreate: boolean) => {
+      const map = createMap(20, 3, 'PLAINS');
+      const player = map.addPlayer('os');
+      const enemy = map.addPlayer('bm');
+      player.team = 0;
+      enemy.team = 1;
+      const terrain = map.getTerrain(0, 1);
+      const factory = new BuildingHost(map, 'FACTORY', player);
+      terrain.building = factory;
+      factory.setTerrain(terrain);
+      map.addUnit('INFANTRY', enemy, 19, 1);
+      const env = new GameEnvironment(map, registry, { maxDays: 20, seed: 3, rng });
+      const retained = new NormalAi({ seed: 3 });
+      const built: string[] = [];
+      for (let day = 0; day < 10; day++) {
+        player.funds = 100_000;
+        for (const unit of player.units) unit.hasMoved = true;
+        const ai = recreate ? new NormalAi({ seed: 3 }) : retained;
+        ai.beginTurn(env);
+        const action = await ai.selectAction(env);
+        expect(action?.kind).toBe('build');
+        if (action?.kind !== 'build') throw new Error('Expected a production action');
+        expect(env.step(action).info.accepted).toBe(true);
+        built.push(action.unitId);
+        map.getUnitAt(action.at.x, action.at.y)!.moveUnitToField(day + 3, 0);
+        env.game.endTurn();
+        env.game.endTurn();
+        expect(env.game.over).toBeNull();
+      }
+      return built;
     };
-    await playMatch(env, [fresh, new RandomAgent(11)], { maxSteps: 8000 });
-    const kinds = new Set(env.game.map.getPlayer(0)!.units.map(unit => unit.getUnitID()));
-    expect(kinds.size).toBeLessThanOrEqual(2);
 
-    // The same agent kept across the match fields a real mix.
-    const kept = environment(3);
-    await playMatch(kept, [new NormalAi({ seed: 3 }), new RandomAgent(11)], { maxSteps: 8000 });
-    const keptKinds = new Set(kept.game.map.getPlayer(0)!.units.map(unit => unit.getUnitID()));
-    expect(keptKinds.size).toBeGreaterThan(kinds.size);
+    const restarted = await purchases(true);
+    const retained = await purchases(false);
+    expect(restarted).toEqual(Array(10).fill('INFANTRY'));
+    expect(retained.slice(0, 6)).toEqual(Array(6).fill('INFANTRY'));
+    expect(retained[6]).not.toBe('INFANTRY');
+    expect(new Set(retained).size).toBeGreaterThanOrEqual(3);
   });
 
   it('keeps its factories producing rather than blocking them', async () => {
