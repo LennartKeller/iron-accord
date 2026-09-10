@@ -55,6 +55,25 @@ jobs:
           IRON_ACCORD_BASE: /${{ github.event.repository.name }}/
         run: npm run build
 
+      - name: Install browser for regression tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Test the production site in desktop and mobile browsers
+        env:
+          IRON_ACCORD_BASE: /${{ github.event.repository.name }}/
+        run: npm run test:browser
+
+      - name: Upload browser diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

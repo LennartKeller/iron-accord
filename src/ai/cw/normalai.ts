@@ -88,6 +88,7 @@ export class NormalAi implements Agent {
   private aiFunctionStep = 0;
   private secondMoveRound = false;
   private rngState: number;
+  private savedProduction: unknown;
   /** Far-away capture targets already claimed this turn. */
   private usedFarAwayBuildings: Point[] = [];
   /**
@@ -105,6 +106,20 @@ export class NormalAi implements Agent {
     this.name = options.name ?? 'normalai';
     this.rngState = (options.seed ?? 1) >>> 0 || 1;
     this.production = new ProductionSystem(() => this.random());
+  }
+
+  /** Turn-local searches are rebuilt against the restored board; purchase history survives. */
+  saveState(): unknown {
+    return { rngState: this.rngState, production: this.savedProduction ?? this.production.saveState() };
+  }
+
+  loadState(value: unknown): void {
+    if (!value || typeof value !== 'object') return;
+    const state = value as { rngState?: unknown; production?: unknown };
+    if (typeof state.rngState !== 'number' || !Number.isInteger(state.rngState)
+      || state.rngState < 0 || state.rngState > 0xffffffff) return;
+    this.rngState = state.rngState;
+    this.savedProduction = state.production;
   }
 
   /** xorshift32, so tie-breaks reproduce from a seed. */
@@ -764,6 +779,10 @@ export class NormalAi implements Agent {
   ): ActionDescriptor | null {
     const production = this.production;
     const owned = buildings.filter(building => building.getOwner() === player);
+    if (this.savedProduction !== undefined) {
+      production.loadState(this.savedProduction, player, owned);
+      this.savedProduction = undefined;
+    }
     if (!production.ready) production.initialize(player, owned);
     production.updateActive(owned);
 

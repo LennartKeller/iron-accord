@@ -1,4 +1,5 @@
 import { TacticalPanel } from '../src/ui/tactical-panel.ts';
+import { createSave, readSave, writeSave, restoreSave, type SavedGame } from '../src/game/save.ts';
 import { captureFeedback } from '../src/ui/action-feedback.ts';
 import { SpriteStore } from '../src/render/sprites.ts';
 import { SceneRenderer } from '../src/render/renderer.ts';
@@ -129,6 +130,31 @@ const options = { dimSpent: true };
 /** Config for the game currently being set up, then for the running game. */
 let config: GameConfig | null = null;
 const fogEnabled = () => (config?.fog ?? 'off') !== 'off';
+
+let autosaveAllowed = true;
+
+// Storage can itself throw (for example when cookies/storage are disabled).
+function saveStatus(message: string, failed = false): void {
+  $('#saveStatus').textContent = message;
+  const indicator = $('#saveIndicator');
+  indicator.textContent = failed ? 'Unsaved' : 'Saved';
+  indicator.title = message;
+  indicator.hidden = false;
+}
+
+/** Called only at committed boundaries, never while AI search or a picker is active. */
+function autosave(): void {
+  if (!autosaveAllowed || !game || !scene || !config || !rng || sceneLoading) return;
+  try {
+    const saved = createSave(game, scene, config, rng, currentMapId);
+    saved.agentStates = Object.fromEntries([...agents].flatMap(([seat, entry]) =>
+      entry.agent instanceof NormalAi ? [[seat, { key: entry.key, state: entry.agent.saveState() }]] : []));
+    if (!writeSave(localStorage, saved)) throw new Error('Storage write failed');
+    saveStatus(`Saved on this device at ${new Date(saved.savedAt).toLocaleTimeString()}. Reload to resume.`);
+  } catch {
+    saveStatus('Autosave unavailable. Keep this tab open to continue this match.', true);
+  }
+}
 
 /**
  * What the next tap means.
@@ -581,6 +607,7 @@ function beginUnload(index: number): void {
     syncUnits();
     syncTurn();
     checkBanner();
+    autosave();
     requestRender();
     return;
   }
@@ -660,6 +687,7 @@ function afterTurnAction(): void {
   syncUnits();
   syncTurn();
   checkBanner();
+  autosave();
   requestRender();
   void maybeRunAI();
 }
@@ -711,6 +739,7 @@ async function maybeRunAI(): Promise<void> {
         syncUnits();
         syncTurn();
         checkBanner();
+        autosave();
         requestRender();
         break;
       }
@@ -726,6 +755,7 @@ async function maybeRunAI(): Promise<void> {
         syncUnits();
         syncTurn();
         checkBanner();
+        autosave();
         requestRender();
         break;
       }
@@ -734,6 +764,8 @@ async function maybeRunAI(): Promise<void> {
       syncBuildings();
       syncUnits();
       syncTurn();
+      checkBanner();
+      autosave();
       requestRender();
       do { await wait(40); } while (isCurrent() && renderer.isAnimating);
     }
@@ -959,20 +991,24 @@ $('#banner-close').addEventListener('click', () => { bannerEl.hidden = true; });
 
 // --- loading --------------------------------------------------------------
 
-async function loadScene(id: string): Promise<void> {
+async function loadScene(id: string, saved?: SavedGame): Promise<void> {
+  let loaded = false;
   const version = ++sceneLoadVersion;
   sceneLoading = true;
   resetInteraction();
+  renderer.clearAnimations();
+  agents.clear();
   game = null;
   env = null;
   syncTurn();
   titleEl.textContent = 'loading…';
   const url = new URL(location.href);
   url.searchParams.set('map', id);
+  url.searchParams.delete('new');
   history.replaceState(null, '', url);
 
   try {
-    const loadedScene: Scene = await (await fetch(asset(`scenes/${id}.json`))).json();
+    const loadedScene: Scene = saved?.scene ?? await (await fetch(asset(`scenes/${id}.json`))).json();
     if (version !== sceneLoadVersion) return;
     scene = loadedScene;
     await renderer.load(loadedScene);
@@ -985,6 +1021,15 @@ async function loadScene(id: string): Promise<void> {
         scene!.players.length, scene!.players.map(p => p.army), scene!.players[0]?.funds ?? 0);
       game = new Game(gameMapFromScene(scene!, registry, config), registry, animations,
         { victoryRules: config.victoryRules });
+      if (saved && rng) {
+        restoreSave(game, rng, saved);
+        for (const [seat, value] of Object.entries(saved.agentStates ?? {})) {
+          const entry = value as { key?: string; state?: unknown };
+          if (!entry || entry.key !== config.seats[Number(seat)]?.agent) continue;
+          const agent = agentFor(Number(seat));
+          if (agent instanceof NormalAi) agent.loadState(entry.state);
+        }
+      }
       // The script RNG must ride along: explore() rewinds it around simulated
       // battles, and without it the AI's deliberation would consume the luck
       // stream the real game draws from.
@@ -1007,7 +1052,7 @@ async function loadScene(id: string): Promise<void> {
     // from a URL (and screenshottable headlessly).
     const params = new URL(location.href).searchParams;
     const select = parsePoint(params.get('select'));
-    if (game && select) {
+    if (game && select && !saved) {
       renderer.selected = select;
       const screenAt = (p: { x: number; y: number }) =>
         renderer.camera.worldToScreen(p.x * 16 + 8, p.y * 16 + 8);
@@ -1064,11 +1109,19 @@ async function loadScene(id: string): Promise<void> {
       }
     }
     requestRender();
+    loaded = true;
   } finally {
     if (version === sceneLoadVersion) {
       sceneLoading = false;
+      if (loaded && game) {
+        checkBanner();
+        if (saved) {
+          saveStatus(`Resumed the match saved on this device at ${new Date(saved.savedAt).toLocaleString()}.`);
+          statusEl.textContent = 'Match resumed';
+        } else autosave();
+      }
       endTurnButton.disabled = aiRunning;
-      void maybeRunAI();
+      if (loaded) void maybeRunAI();
     }
   }
 }
@@ -1367,6 +1420,7 @@ $('#setupStart').addEventListener('click', () => {
   setupDraft.victoryRules = readVictoryRules();
   // Clamp in the model too: the form is not the only way in.
   config = sanitizeConfig(setupDraft);
+  autosaveAllowed = true;
   // A fresh game starts omniscient; the previous game's choice should not
   // silently carry over into one with different seats.
   observerSeat = null;
@@ -1431,7 +1485,34 @@ async function main(): Promise<void> {
     // Categories come from the map directory names, which use underscores.
     ?? index.find(e => e.category === 'pre_deployed')
     ?? index[0];
-  if (startup) {
+  let saved: SavedGame | undefined;
+  const explicitStart = ['new', 'select', 'to', 'build', 'do', 'repeat', 'tap', 'press', 'fog', 'ai']
+    .some(key => initial.has(key));
+  if (registry && !explicitStart) {
+    try {
+      const result = readSave(localStorage);
+      if (result.status === 'ready' && (!requested || requested === result.save.mapId)) saved = result.save;
+      else if (result.status === 'invalid') {
+        autosaveAllowed = false;
+        saveStatus('The previous save could not be read. Use New to replace it.', true);
+      }
+      else if (result.status === 'unavailable') saveStatus('Autosave unavailable in this browser.', true);
+    } catch { saveStatus('Autosave unavailable in this browser.', true); }
+  }
+  if (saved) {
+    currentMapId = saved.mapId;
+    config = saved.config;
+    try { await loadScene(saved.mapId, saved); }
+    catch (error) {
+      console.error('Could not resume saved match', error);
+      game = null;
+      env = null;
+      sceneLoading = false;
+      syncTurn();
+      saveStatus('This save could not be resumed. Use New to start a match.', true);
+      statusEl.textContent = 'Could not resume match';
+    }
+  } else if (startup) {
     currentMapId = startup.id;
     const scene: Scene = await (await fetch(asset(`scenes/${startup.id}.json`))).json();
     config = defaultConfig(
@@ -1479,6 +1560,13 @@ async function main(): Promise<void> {
   if (ui === 'maps') { renderList(); picker.showModal(); }
   else if (ui === 'setup' && startup) await openSetup(startup);
   else if (ui === 'settings') settingsDialog.showModal();
+
+  // Startup commands are one-shot. Reloading a configured battle resumes it.
+  const cleanUrl = new URL(location.href);
+  for (const key of ['new', 'select', 'to', 'build', 'do', 'repeat', 'tap', 'press', 'fog', 'ai', 'ui']) {
+    cleanUrl.searchParams.delete(key);
+  }
+  history.replaceState(null, '', cleanUrl);
 }
 
 void main();

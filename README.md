@@ -7,6 +7,13 @@ A touch-first, installable web reimplementation of [Commander Wars](https://gith
 The initial target is playing against the AI on phones, tablets and desktop
 browsers, with mouse support alongside touch.
 
+Matches autosave on this device after completed actions and turns. Reload or reopen
+the game to resume, including mid-turn unit state and combat luck. The header shows
+whether saving succeeded; Settings has details. **New → Start** replaces the single
+saved match. Clearing browser storage removes it. Cancelled moves and combat previews
+do not change the save. AI purchase history survives; its turn planning is rebuilt
+from the restored board.
+
 ## The core idea
 
 Commander Wars keeps its game *content* — units, COs, weapons and damage
@@ -64,7 +71,15 @@ npm run build:data    # 570 maps + 688 sprites -> 6.6 MB in data/
 npm run dev           # dev server; open the printed URL
 npm test              # run the test suite
 npm run typecheck
+npx playwright install chromium  # one-time browser download
+npm run build
+npm run test:browser   # production desktop + mobile regression tests
 ```
+
+Browser tests require generated `data/` and a production build. If the build uses
+`IRON_ACCORD_BASE=/iron-accord/`, pass that same environment variable to
+`test:browser`. CI runs these checks before publishing and uploads browser traces
+and screenshots if a check fails.
 
 Production builds include only runtime assets from `data/`; local training datasets
 are excluded. See [the core debug audit](docs/debug-audit-2026-09-10.md) for recent
@@ -80,7 +95,9 @@ factory's build menu), `?to=x,y` walks it to a destination and opens the action
 menu, `?build=UNIT_ID` produces a unit at a selected building, `?do=ACTION_ID`
 performs an action instead of opening the menu, `?fog=1` starts with fog of war
 on, and `?ui=maps|setup|settings` opens a dialog on load. Maps in the `pre-deployed`
-category start with units on the field.
+category start with units on the field. Startup commands are removed from the URL
+after loading so a subsequent reload resumes the match. Use `?new=1` to explicitly
+start fresh.
 
 Everything runs under bare `node` (no build step) — the code avoids TypeScript
 syntax that Node's type-stripping rejects, notably constructor parameter

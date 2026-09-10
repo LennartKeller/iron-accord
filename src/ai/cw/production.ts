@@ -97,6 +97,45 @@ export class ProductionSystem {
 
   get ready(): boolean { return this.initialised; }
 
+  /** Base distributions reflect the factories owned when this system was initialized. */
+  saveState(): unknown {
+    return this.initialised ? structuredClone({
+      initialProduction: this.initialProduction, forcedProduction: this.forcedProduction,
+      buildDistribution: [...this.buildDistribution],
+    }) : null;
+  }
+
+  loadState(value: unknown, _player: Player, _buildings: readonly BuildingHost[]): void {
+    if (!value || typeof value !== 'object') return;
+    const state = value as { initialProduction?: unknown; forcedProduction?: unknown; buildDistribution?: unknown };
+    const ids = (value: unknown): value is string[] => Array.isArray(value)
+      && value.length < 1000 && value.every(id => typeof id === 'string');
+    if (!Array.isArray(state.initialProduction) || !Array.isArray(state.forcedProduction)
+      || state.initialProduction.length > 1000 || state.forcedProduction.length > 1000
+      || !state.initialProduction.every(item => item && ids(item.unitIds)
+        && Number.isSafeInteger(item.count) && item.count >= 0)
+      || !state.forcedProduction.every(item => item && ids(item.unitIds))) return;
+    // The active subset is derived from current factories by updateActive, but
+    // the base weights must survive captured or lost airports and ports.
+    if (!Array.isArray(state.buildDistribution) || state.buildDistribution.length > 1000
+      || !state.buildDistribution.every(entry => {
+        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string') return false;
+        const item = entry[1];
+        return item && ids(item.unitIds) && Array.isArray(item.chance)
+          && item.chance.length === item.unitIds.length
+          && item.chance.every((n: unknown) => typeof n === 'number' && Number.isFinite(n) && n >= 0)
+          && ['totalChance', 'distribution', 'maxUnitDistribution', 'buildMode'].every(key =>
+            typeof item[key] === 'number' && Number.isFinite(item[key]) && item[key] >= 0)
+          && item.totalChance === item.chance.reduce((sum: number, n: number) => sum + n, 0);
+      }) || new Set(state.buildDistribution.map(entry => entry[0])).size !== state.buildDistribution.length) return;
+    this.buildDistribution.clear();
+    for (const [name, item] of structuredClone(state.buildDistribution)) this.buildDistribution.set(name, item);
+    this.activeDistribution.clear();
+    this.initialised = true;
+    this.initialProduction = structuredClone(state.initialProduction);
+    this.forcedProduction = structuredClone(state.forcedProduction);
+  }
+
   /** ai/productionSystem: SimpleProductionSystem::addItemToBuildDistribution. */
   private addItemToBuildDistribution(group: BuildGroup, distribution: number): void {
     if (group.unitIds.length !== group.chance.length) return;

@@ -30,6 +30,7 @@
     <button id="pick" class="chip" type="button">Maps</button>
     <button id="newgame" class="chip" type="button">New</button>
     <span id="title" class="title">loading…</span>
+    <span id="saveIndicator" class="muted" hidden aria-live="polite"></span>
     <button id="settings" class="chip" type="button">⚙</button>
   </header>
 
@@ -60,6 +61,7 @@
     <div class="settings">
       <label><input id="optGrid" type="checkbox" /> Show grid</label>
       <label><input id="optDim" type="checkbox" checked /> Dim spent units</label>
+      <p id="saveStatus" class="settings__note">Completed actions and turns are saved on this device. Reload to resume.</p>
       <p class="settings__note">Fog and opponents are chosen when a game starts.</p>
     </div>
   </dialog>
@@ -101,6 +103,7 @@
       <button id="setupStart" class="chip chip--primary" type="button">Start</button>
     </div>
     <div class="setup">
+      <p class="settings__note">Starting a new match replaces the saved match on this device.</p>
       <div class="setup__row">
         <label>Fog
           <select id="cfgFog">

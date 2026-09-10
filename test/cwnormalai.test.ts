@@ -108,7 +108,7 @@ describe('NormalAi', () => {
     // Isolate production from combat, casualties, captured airports and funds.
     // Each day offers one empty factory; earlier purchases stay in the army
     // but are parked and spent so movement cannot change the production mix.
-    const purchases = async (recreate: boolean) => {
+    const purchases = async (recreate: boolean | 'resume') => {
       const map = createMap(20, 3, 'PLAINS');
       const player = map.addPlayer('os');
       const enemy = map.addPlayer('bm');
@@ -122,16 +122,19 @@ describe('NormalAi', () => {
       const env = new GameEnvironment(map, registry, { maxDays: 20, seed: 3, rng });
       const retained = new NormalAi({ seed: 3 });
       const built: string[] = [];
+      let saved: unknown;
       for (let day = 0; day < 10; day++) {
         player.funds = 100_000;
         for (const unit of player.units) unit.hasMoved = true;
         const ai = recreate ? new NormalAi({ seed: 3 }) : retained;
+        if (recreate === 'resume' && saved) ai.loadState(JSON.parse(JSON.stringify(saved)));
         ai.beginTurn(env);
         const action = await ai.selectAction(env);
         expect(action?.kind).toBe('build');
         if (action?.kind !== 'build') throw new Error('Expected a production action');
         expect(env.step(action).info.accepted).toBe(true);
         built.push(action.unitId);
+        saved = ai.saveState();
         map.getUnitAt(action.at.x, action.at.y)!.moveUnitToField(day + 3, 0);
         env.game.endTurn();
         env.game.endTurn();
@@ -142,6 +145,7 @@ describe('NormalAi', () => {
 
     const restarted = await purchases(true);
     const retained = await purchases(false);
+    expect(await purchases('resume')).toEqual(retained);
     expect(restarted).toEqual(Array(10).fill('INFANTRY'));
     expect(retained.slice(0, 6)).toEqual(Array(6).fill('INFANTRY'));
     expect(retained[6]).not.toBe('INFANTRY');
