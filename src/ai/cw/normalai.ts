@@ -2,7 +2,7 @@ import type { Agent } from '../agent.ts';
 import type { ActionDescriptor } from '../actions.ts';
 import type { GameEnvironment } from '../environment.ts';
 import type { Game } from '../../game/game.ts';
-import { Unit, type BuildingHost, type Player } from '../../host/index.ts';
+import { MAX_UNIT_HP, Unit, type BuildingHost, type Player } from '../../host/index.ts';
 import { computeMovementRange, key } from '../../game/pathfinding.ts';
 import { apparentCanProduceAt, isKnownBuilding, visibleUnitAt } from './visibility.ts';
 import { CoreAI } from './coreai.ts';
@@ -16,7 +16,7 @@ import { InfluenceFrontMap } from './influencefrontmap.ts';
 import { TargetedUnitPathFindingSystem } from './targetedpfs.ts';
 import { createUnitData, sortUnitsFarFromEnemyFirst, type MoveUnitData } from './unitdata.ts';
 import { getAttackTargets, getBestAttacksFromField, getBestTarget, type MoveTargetField, type TargetScoringOptions } from './targets.ts';
-import { getBestAttackTarget, type ScoringContext } from './scoring.ts';
+import { calculateCounterDamage, getBestAttackTarget, type ScoringContext } from './scoring.ts';
 import {
   appendTerrainBuildingAttackTargets, getClosestReachableMovePath, getMoveTargetField,
   hasTargets, moveToSafety, type Point,
@@ -810,27 +810,41 @@ export class NormalAi implements Agent {
    */
   private moveAwayFromProduction(game: Game): ActionDescriptor | null {
     this.aiStep = AISteps.moveAway;
+    const buildings = this.ownBuildings(game, this.core!.player);
+    const enemyBuildings = this.enemyBuildings(game, this.core!.player);
     for (const data of this.ownUnits) {
-      const unit = data.unit;
-      if (unit.getHasMoved() || data.range === null) continue;
-      const terrain = unit.getTerrain();
-      if (terrain === null) continue;
-      const building = terrain.getBuilding();
-      const owner = building?.getOwner() ?? null;
-      const onProduction = building !== null && !this.core!.player.isEnemy(owner)
-        && building.isProductionBuilding();
-      if (!onProduction) continue;
+      const action = this.idleProductionExit(game, data, buildings, enemyBuildings);
+      if (action) return action;
+    }
+    return null;
+  }
 
-      for (const tile of data.range.tiles.values()) {
-        if (tile.cost <= 0 || tile.cost > data.movementPoints) continue;
-        if (!tile.canStop) continue;
-        const newTerrain = game.map.getTerrain(tile.x, tile.y);
-        if (visibleUnitAt(game.map, this.core!.player, tile.x, tile.y) !== null) continue;
-        const newBuilding = newTerrain.getBuilding();
-        if (newBuilding !== null && isKnownBuilding(newBuilding, this.core!.player) && newBuilding.isProductionBuilding()) continue;
-        if (!this.canPerform(game, unit, tile, CwAction.WAIT)) continue;
-        return this.unitAction(unit, CwAction.WAIT, tile);
-      }
+  /** Free an idle base before spending its occupant's turn waiting on it. */
+  private idleProductionExit(
+    game: Game, data: MoveUnitData, buildings: BuildingHost[], enemyBuildings: BuildingHost[],
+  ): ActionDescriptor | null {
+    const core = this.core!;
+    const unit = data.unit;
+    if (unit.getHasMoved() || data.range === null || unit.getHp() < MAX_UNIT_HP || core.needsRefuel(unit)) return null;
+    const building = unit.getTerrain()?.getBuilding();
+    if (!building || building.getOwner() !== core.player || !building.canBuildUnits()) return null;
+    const limit = game.map.getGameRules().getUnitLimit();
+    if (limit > 0 && core.player.units.length >= limit) return null;
+    if (!game.buildOptions(building).some(option => option.affordable)) return null;
+
+    const context = this.context();
+    const candidates = [...data.range.tiles.values()].filter(tile => {
+      if (tile.cost <= 0 || tile.cost > data.movementPoints || !tile.canStop) return false;
+      if (visibleUnitAt(game.map, core.player, tile.x, tile.y) !== null) return false;
+      const destination = game.map.getTerrain(tile.x, tile.y).getBuilding();
+      return !destination || !isKnownBuilding(destination, core.player) || !destination.isProductionBuilding();
+    }).sort((a, b) => a.cost - b.cost
+      || game.map.getTerrain(b.x, b.y).getDefense(unit) - game.map.getTerrain(a.x, a.y).getDefense(unit));
+    for (const tile of candidates) {
+      // Production is not worth deliberately sacrificing a healthy unit.
+      if (calculateCounterDamage(context, data, tile, null, 0, buildings, enemyBuildings, true, false) > 0) continue;
+      if (!this.canPerform(game, unit, tile, CwAction.WAIT)) continue;
+      return this.unitAction(unit, CwAction.WAIT, { x: tile.x, y: tile.y });
     }
     return null;
   }
@@ -1270,6 +1284,10 @@ export class NormalAi implements Agent {
     if (data.actions.includes(CwAction.CAPTURE)
       && this.canPerform(game, unit, stop, CwAction.CAPTURE)) {
       return this.unitAction(unit, CwAction.CAPTURE, stop);
+    }
+    if (stayedPut) {
+      const clearance = this.idleProductionExit(game, data, buildings, enemyBuildings);
+      if (clearance) return clearance;
     }
     if (this.canPerform(game, unit, stop, CwAction.WAIT)) {
       return this.unitAction(unit, CwAction.WAIT, stop);

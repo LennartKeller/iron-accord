@@ -8,7 +8,7 @@ import { NORMAL_AI_DEFAULTS } from '../src/ai/cw/config.ts';
 import { InfluenceFrontMap } from '../src/ai/cw/influencefrontmap.ts';
 import { createUnitData } from '../src/ai/cw/unitdata.ts';
 import { getAttackTargetsFast, getBestAttacksFromField } from '../src/ai/cw/targets.ts';
-import { calculateCounterDamage, getBestAttackTarget, getOwnSupportDamage, type ScoringContext } from '../src/ai/cw/scoring.ts';
+import { calculateCounterDamage, getMapInfluenceModifier, getBestAttackTarget, getOwnSupportDamage, type ScoringContext } from '../src/ai/cw/scoring.ts';
 
 const { registry, createMap, animations } = bootstrap();
 
@@ -28,6 +28,18 @@ function battlefield() {
 }
 
 describe('Commander Wars attack scoring', () => {
+  it('keeps the threat premium finite when a destination has no friendly influence', () => {
+    const { map, player, context, ai } = battlefield();
+    const actor = map.addUnit('LIGHT_TANK', player, 0, 0);
+    const info = context.influence.getInfluenceInfo(3, 3);
+    vi.spyOn(info, 'getEnemyInfluence').mockReturnValue(7000);
+    vi.spyOn(info, 'getOwnInfluence').mockReturnValue(0);
+    ai.config.influenceMultiplier = 0.8;
+    expect(getMapInfluenceModifier(context, actor, 3, 3)).toBe(actor.getCoUnitValue() * 0.8);
+    ai.config.influenceMultiplier = 0;
+    expect(getMapInfluenceModifier(context, actor, 3, 3)).toBe(0);
+  });
+
   it('uses the fast counter approximation and net HP for supporting infantry', () => {
     const { map, game, player, enemy, context, ai } = battlefield();
     const actor = map.addUnit('INFANTRY', player, 2, 3);

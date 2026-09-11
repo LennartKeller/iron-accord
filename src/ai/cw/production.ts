@@ -158,8 +158,13 @@ export class ProductionSystem {
     context.enemyUnits.pruneEnemies(context.units, context.buildings,
       core.config.ownBuildingPruneRange, core.config.enemyPruneRange);
     const visibleEnemies = context.enemyUnits.items;
-    const nearest = (building: BuildingHost) => Math.min(...visibleEnemies.map(unit =>
-      Math.abs(building.getX() - unit.x) + Math.abs(building.getY() - unit.y)));
+    // With no observed units, known hostile structures still locate the front.
+    // Neutral capture objectives do not identify an enemy army's direction.
+    const front = visibleEnemies.length ? visibleEnemies.map(unit => ({ x: unit.x, y: unit.y }))
+      : context.enemyBuildings.items.filter(building => building.getOwner() !== null)
+        .map(building => ({ x: building.getX(), y: building.getY() }));
+    const nearest = (building: BuildingHost) => Math.min(...front.map(target =>
+      Math.abs(building.getX() - target.x) + Math.abs(building.getY() - target.y)));
     buildings = [...buildings].sort((a, b) => nearest(a) - nearest(b));
     context.buildings.items.splice(0, context.buildings.items.length, ...buildings);
     const system = this.scriptSystem(player);
@@ -217,14 +222,31 @@ export class ProductionSystem {
     const scripted = { ...system,
       buildNextUnit: (_buildings: unknown, _units: unknown, minMode: number, maxMode: number,
         minIsland: number, minCost: number, maxCost: number, alwaysBuild = false): boolean => {
-        chosen = this.buildNextUnit(game, player, buildings, player.units, (at, id) => {
+        const eligible = (at: { x: number; y: number }, id: string): boolean => {
           if (!apparentCanProduceAt(game, at.x, at.y)) return false;
           const building = game.map.getTerrain(at.x, at.y).getBuilding();
           if (!building || !game.buildOptions(building).some(option => option.id === id && option.affordable)) return false;
           if (canBuild && !canBuild(at, id)) return false;
           if ((averages.get(building) ?? 0) * minIsland > islandSize(id, building)) return false;
           return alwaysBuild || reasonable(at, id);
-        }, minMode, maxMode, minCost, maxCost);
+        };
+        chosen = this.buildNextUnit(game, player, buildings, player.units, eligible,
+          minMode, maxMode, minCost, maxCost);
+        // Reserving funds only helps if some base can spend the remainder.
+        // In particular a lone airport must not reserve its own helicopter's
+        // funds indefinitely. Release the reserve after this phase selects no
+        // purchase; all real cost, mobility and danger checks stay.
+        if (!chosen && maxCost >= 0 && maxCost < player.getFunds()) {
+          let availableMode = maxMode;
+          for (const [day, funds, , mode] of [...PRODUCTION_POLICY.fundsModes].reverse()) {
+            if (game.day >= day && player.getFunds() >= funds) {
+              availableMode = Math.max(maxMode, mode);
+              break;
+            }
+          }
+          chosen = this.buildNextUnit(game, player, buildings, player.units, eligible,
+            minMode, availableMode, minCost, player.getFunds());
+        }
         if (chosen) this.producedCount++;
         return chosen !== null;
       },

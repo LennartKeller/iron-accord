@@ -133,6 +133,41 @@ This strengthens the intentional safeguards; it does not turn them into native
 Commander Wars behavior or prove that every hosted script respects an information
 boundary for every possible map/mod.
 
+## Practical gameplay adaptations — 2026-09-11
+
+The reported army buildup and unused captured bases prompted a gameplay review,
+separate from native fidelity. The following changes intentionally go beyond the
+pinned policy rather than claiming to reproduce it:
+
+- **Release an unusable production reserve.** The pinned calculation can reserve
+  2000G for a lone empty airport itself: at day 10 with 10000G, its 8000G ceiling
+  excludes a 9000G K_HELI and the reproduced decision was null. If a phase selects
+  no purchase under its budget, the adapter retries with current funds
+  and a funds/day-appropriate mode ceiling. Actual affordability, static mobility,
+  relative-island checks and that pass's danger constraint still apply. Opening
+  purchases and persisted queues are not reinitialized when a base is captured.
+- **Use known structures to locate the front.** If production's pruned visible
+  enemy-unit list is empty, known hostile buildings replace an otherwise empty
+  distance target set. This removes the accidental map-scan preference for a rear
+  factory. Neutral and shrouded buildings are not enemy-front evidence.
+- **Clear healthy idle production bases before Wait.** A fully healthy idle unit
+  can take a safe exit from its owned factory or airport before spending its turn
+  in place. This makes the base available to the later production stage. Capture
+  and repair priorities remain, and forecast-damage destinations are rejected.
+- **Keep influence finite.** Zero friendly influence no longer produces an
+  infinite premium. Retaliation remains an aggregate risk heuristic, rather than
+  a literal casualty prediction; no unit-value cap or supported-attack tolerance
+  is applied.
+
+Regression fixtures are in `test/production-captured-bases.test.ts`,
+`test/cw-production-clearance.test.ts` and `test/cw-scoring-fidelity.test.ts`.
+They cover the reproduced airport failure, front-base ordering and shroud exclusion,
+clearance followed by actual production, and finite influence scoring. These fixtures
+are not evidence that SquashIsland self-play always finishes, that the overall
+stall is eliminated, or that win rates improve. Measured results are in the
+[Squash Island review](ai-stalemate-review-2026-09-11.md); the earlier suite counts
+remain historical checkpoints.
+
 ## Remaining compatibility limits
 
 These repairs do not establish native parity. Remaining differences include:
@@ -151,6 +186,9 @@ These repairs do not establish native parity. Remaining differences include:
   Bomb valuation excludes stealthed enemies, Oozium pursuit uses visible targets,
   and building target selection excludes hidden occupants. These are intentional
   information-safety exceptions, not claims of identical native choices.
+- The practical gameplay adaptations above deliberately alter production budgets,
+  base ordering and clearance. They are not native
+  parity repairs.
 - Deliberate safety exceptions: valid price-to-unit associations instead of the
   upstream parallel-array deletion bug, visibility filtering, refusing immobile
   purchases, reachable leaf goals, cumulative movement budgets, and the documented

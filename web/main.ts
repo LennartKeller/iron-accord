@@ -19,6 +19,7 @@ import {
   type Agent,
 } from '../src/ai/index.ts';
 import { ValueNetAgent } from '../src/ai/valuenet.web.ts';
+import { CoordinatedAi } from '../src/ai/coordinated.ts';
 import { defaultConfig, sanitizeConfig, LIMITS, type GameConfig, type SeatController } from '../src/game/config.ts';
 import { GameEnums, type AnimationRunner, type Mulberry32, type Unit } from '../src/host/index.ts';
 import type { ScriptRegistry } from '../src/scripts/types.ts';
@@ -76,16 +77,7 @@ let rng: Mulberry32 | null = null;
 let game: Game | null = null;
 let scene: Scene | null = null;
 let env: GameEnvironment | null = null;
-/**
- * The opponents on offer.
- *
- * `commanderwars` is the strongest of them and also the cheapest: it is
- * Commander Wars' own NormalAi, ported, and it beats the heuristic 0.906 and
- * the value-net planner's own baseline while thinking for milliseconds rather
- * than seconds. The planner searches whole turns and reasons from what its side
- * can actually see; the heuristic is the fastest and stays the default so a
- * first tap is instant.
- */
+/** Independent opponent choices; experimental coordination leaves NormalAi unchanged. */
 const AGENTS: Record<string, () => Agent> = {
   heuristic: () => new HeuristicAgent(),
   // Seeded per battle rather than fixed, so repeat games are not identical.
@@ -94,6 +86,7 @@ const AGENTS: Record<string, () => Agent> = {
     // Seeded per battle rather than fixed, so repeat games are not identical.
     seed: (Math.random() * 0x7fffffff) >>> 0 || 1,
   }),
+  coordinated: () => new CoordinatedAi({ seed: (Math.random() * 0x7fffffff) >>> 0 || 1 }),
   // A visible turn should not stall on a phone, so the search is kept short.
   planner: () => new PlannerAgent({ timeBudgetMs: 250 }),
   // Same search, learned position evaluation. The model loads on first use.
@@ -148,7 +141,8 @@ function autosave(): void {
   try {
     const saved = createSave(game, scene, config, rng, currentMapId);
     saved.agentStates = Object.fromEntries([...agents].flatMap(([seat, entry]) =>
-      entry.agent instanceof NormalAi ? [[seat, { key: entry.key, state: entry.agent.saveState() }]] : []));
+      entry.agent instanceof NormalAi || entry.agent instanceof CoordinatedAi
+        ? [[seat, { key: entry.key, state: entry.agent.saveState() }]] : []));
     if (!writeSave(localStorage, saved)) throw new Error('Storage write failed');
     saveStatus(`Saved on this device at ${new Date(saved.savedAt).toLocaleTimeString()}. Reload to resume.`);
   } catch {
@@ -1042,7 +1036,7 @@ async function loadScene(id: string, saved?: SavedGame): Promise<void> {
           const entry = value as { key?: string; state?: unknown };
           if (!entry || entry.key !== config.seats[Number(seat)]?.agent) continue;
           const agent = agentFor(Number(seat));
-          if (agent instanceof NormalAi) agent.loadState(entry.state);
+          if (agent instanceof NormalAi || agent instanceof CoordinatedAi) agent.loadState(entry.state);
         }
       }
       // The script RNG must ride along: explore() rewinds it around simulated
@@ -1370,7 +1364,7 @@ function renderSeats(draft: GameConfig, scene: Scene): void {
     // for a human seat, so it appears only when one is needed.
     const controlCell = document.createElement('td');
     const opponent = select(Object.keys(AGENTS), seat.agent ?? 'heuristic',
-      value => { seat.agent = value; });
+      value => { seat.agent = value; }, { commanderwars: 'Commander Wars', coordinated: 'Coordinated (experimental)' });
     opponent.hidden = seat.controller !== 'ai';
     controlCell.append(select(['human', 'ai'], seat.controller, value => {
       seat.controller = value as SeatController;
@@ -1382,12 +1376,13 @@ function renderSeats(draft: GameConfig, scene: Scene): void {
   }));
 }
 
-function select(values: string[], current: string, onChange: (value: string) => void): HTMLSelectElement {
+function select(values: string[], current: string, onChange: (value: string) => void,
+  labels: Record<string, string> = {}): HTMLSelectElement {
   const element = document.createElement('select');
   element.replaceChildren(...values.map(value => {
     const option = document.createElement('option');
     option.value = value;
-    option.textContent = value;
+    option.textContent = labels[value] ?? value;
     if (value === current) option.selected = true;
     return option;
   }));

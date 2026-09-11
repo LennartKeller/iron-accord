@@ -31,7 +31,9 @@ export class ProductionUnitList {
 
 export class ProductionBuildingList {
   readonly items: BuildingHost[];
-  constructor(buildings: readonly BuildingHost[], private observer?: { map: GameMap; player: Player }) {
+  private readonly observer?: { map: GameMap; player: Player };
+  constructor(buildings: readonly BuildingHost[], observer?: { map: GameMap; player: Player }) {
+    this.observer = observer;
     this.items = observer ? buildings.filter(building => isKnownBuilding(building, observer.player)) : [...buildings];
   }
   size(): number { return this.items.length; }

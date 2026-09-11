@@ -175,3 +175,46 @@ test('one-time fog URL option does not restart a resumed match', async ({ page }
   await expect(page.locator('#turn')).toContainText('P2');
   expect((await savedGame(page)).state).toEqual(before.state);
 });
+
+
+test('coordinated opponent is separate from Commander Wars and survives save/resume', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await openGame(page);
+  await page.locator('#newgame').click();
+  const seats = page.locator('#seatRows tr');
+  const opponent = seats.nth(1).locator('select').last();
+  await seats.nth(1).locator('select').nth(2).selectOption('ai');
+  await expect(opponent.locator('option[value="commanderwars"]')).toHaveText('Commander Wars');
+  await expect(opponent.locator('option[value="coordinated"]')).toHaveText('Coordinated (experimental)');
+  await opponent.selectOption('commanderwars');
+  await expect(opponent).toHaveValue('commanderwars');
+  await opponent.selectOption('coordinated');
+  await page.locator('#setupStart').click();
+  await expect(page.locator('#saveIndicator')).toHaveText('Saved');
+  expect((await savedGame(page)).config.seats[1].agent).toBe('coordinated');
+
+  await page.locator('#endturn').click();
+  await expect.poll(async () => (await savedGame(page)).state.day).toBe(2);
+  await expect(page.locator('#endturn')).toBeEnabled();
+  const before = await savedGame(page);
+  expect(before.agentStates?.['1']).toMatchObject({ key: 'coordinated', state: expect.any(Object) });
+  expect(before.state.units.some(unit => unit.owner === 1 && (unit.x !== 5 || unit.y !== 3))).toBe(true);
+
+  await page.reload();
+  await expect(page.locator('#endturn')).toBeEnabled();
+  const resumed = await savedGame(page);
+  expect(resumed.config.seats[1].agent).toBe('coordinated');
+  expect(resumed.agentStates).toEqual(before.agentStates);
+  expect(resumed.state).toEqual(before.state);
+
+  // A fresh autosave must contain the restored agent, not just the old disk payload.
+  await expect(page.locator('#nextunit')).toHaveText('Next (2)');
+  await tapTile(page, 1, 3);
+  await expect(page.locator('.tactical-name')).toHaveText('Infantry');
+  await tapTile(page, 2, 3);
+  await page.locator('#menu').getByRole('button', { name: 'Wait', exact: true }).click();
+  await expect(page.locator('#endturn')).toBeEnabled();
+  expect((await savedGame(page)).agentStates).toEqual(before.agentStates);
+  expect(errors).toEqual([]);
+});

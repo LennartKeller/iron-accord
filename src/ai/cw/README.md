@@ -3,7 +3,7 @@
 A partial TypeScript port of the C++ opponent that ships with Commander Wars
 (`ext/Commander_Wars/ai/`), running against iron-accord's host objects.
 
-## Fidelity status (2026-09-10)
+## Fidelity status (2026-09-11)
 
 The [source audit](../../../docs/cw-ai-fidelity-audit-2026-09-10.md) found substantial
 behavioral differences. The first repair pass fixes enemy movement ranges/influence,
@@ -39,6 +39,32 @@ visible positions produce the same action.
 Planning uses apparent occupancy; execution still checks actual collisions and
 rejects blocked production. The production mobility probe never installs a dummy
 unit on the board. These are deliberate safeguards, not native parity claims.
+
+## Practical gameplay adaptations (2026-09-11)
+
+The stalled-army review adds explicit departures from pinned NormalAi behavior:
+
+- A production phase that selects no purchase within its reserved budget retries
+  with available funds and the corresponding funds/day mode ceiling. This lets a
+  newly captured airport buy a 9000G helicopter from 10000G instead of reserving
+  2000G and building nothing. Affordability, mobility, island and danger checks
+  remain in force, and the opening queue is not restarted.
+- When no visible enemy units remain in the production proximity set, known hostile
+  buildings locate the front for base ordering. Shrouded structures remain excluded.
+- A healthy idle unit tries a safe exit from an owned production base before its
+  final Wait consumes the turn. Capture and repair needs retain their priority;
+  clearance does not deliberately move a unit into forecast damage.
+- Influence scoring stays finite when friendly influence is zero. Retaliation
+  remains an aggregate risk heuristic, rather than a literal prediction of how
+  many times a unit can be destroyed.
+
+These changes have focused regressions in `test/production-captured-bases.test.ts`,
+`test/cw-production-clearance.test.ts` and `test/cw-scoring-fidelity.test.ts`.
+These tests establish
+the covered decisions and safety bounds; they do not establish that Squash Island
+self-play now finishes or that the opponent is stronger across maps. See the
+[Squash Island review](../../../docs/ai-stalemate-review-2026-09-11.md) for measured
+self-play results and remaining limitations.
 
 ## Why port rather than run it
 
@@ -269,7 +295,8 @@ land/air/naval composition using the hosted topology information. Infantry and
 amphibious weights follow their own upstream rules instead of inheriting the tank
 ground multiplier. Captured production buildings can activate already configured
 groups. Factory checks include relative island size and a danger-avoiding attempt
-before the upstream always-build fallback.
+before the upstream always-build fallback. The practical reserve-release and
+known-front ordering adaptations above also apply.
 
 Autosaves retain policy variables, preparation turn, purchase count, pending queues
 and distributions. The port deliberately keeps correct price-to-unit associations,

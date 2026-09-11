@@ -97,11 +97,8 @@ export function calculateCounterBuildingDamage(
  * ai/normalai.cpp: NormalAi::getMapInfluenceModifier -- a risk premium for
  * standing on ground the enemy owns.
  *
- * The division is upstream's and so is its edge: the second branch guards only
- * `enemyInfluence > 0`, so a tile where we have no influence at all divides by
- * zero and yields Infinity, which then flows straight into a counter-damage
- * score. JavaScript numbers are IEEE doubles exactly like the C++ floats, so
- * this reproduces the original rather than diverging from it.
+ * The risk ratio is bounded even when friendly influence is zero. An infinite
+ * premium would veto every attack or advance onto an enemy-controlled tile.
  */
 export function getMapInfluenceModifier(
   context: ScoringContext, unit: Unit, x: number, y: number,
@@ -110,7 +107,7 @@ export function getMapInfluenceModifier(
   const enemyInfluence = info.getEnemyInfluence();
   const ownInfluence = info.getOwnInfluence();
   let influence = 0;
-  if (enemyInfluence > ownInfluence && ownInfluence > 0) {
+  if (enemyInfluence > ownInfluence) {
     influence = 1 - ownInfluence / enemyInfluence;
   } else if (enemyInfluence > 0) {
     influence = -(1 - enemyInfluence / ownInfluence);
@@ -133,7 +130,7 @@ export function calculateCounterDamage(
   context: ScoringContext, curUnitData: MoveUnitData, newPosition: { x: number; y: number },
   enemyUnit: Unit | null, enemyTakenDamage: number,
   buildings: readonly BuildingHost[], enemyBuildings: readonly BuildingHost[],
-  ignoreOutOfVisionRange: boolean,
+  ignoreOutOfVisionRange: boolean, includeInfluence = true,
 ): number {
   const { ai, ownUnits, enemyUnits } = context;
   const { config } = ai;
@@ -240,7 +237,7 @@ export function calculateCounterDamage(
   }
 
   return counterDamage
-    + getMapInfluenceModifier(context, unit, newPosition.x, newPosition.y)
+    + (includeInfluence ? getMapInfluenceModifier(context, unit, newPosition.x, newPosition.y) : 0)
     + calculateCounterBuildingDamage(context, unit, newPosition, buildings, enemyBuildings);
 }
 

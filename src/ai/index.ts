@@ -18,6 +18,8 @@ export type { PositionWeights } from './position.ts';
 export { HeuristicEvaluator } from './evaluator.ts';
 export type { Evaluator } from './evaluator.ts';
 export { NormalAi } from './cw/normalai.ts';
+export { CoordinatedAi } from './coordinated.ts';
+export type { CoordinatedAiOptions } from './coordinated.ts';
 export type { NormalAiOptions } from './cw/normalai.ts';
 export { NORMAL_AI_DEFAULTS } from './cw/config.ts';
 export type { NormalAiConfig } from './cw/config.ts';

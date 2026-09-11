@@ -14,6 +14,11 @@ saved match. Clearing browser storage removes it. Cancelled moves and combat pre
 do not change the save. AI purchase history survives; its turn planning is rebuilt
 from the restored board.
 
+The separate **Coordinated (experimental)** AI option tries ordered attacks by a
+small group, recalculating after each shot. Select it for an AI seat in **New**;
+the **Commander Wars** option remains available with its existing policy. See
+[coordination scope and validation](docs/coordinated-ai.md).
+
 ## The core idea
 
 Commander Wars keeps its game *content* — units, COs, weapons and damage
