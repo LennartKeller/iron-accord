@@ -41,6 +41,7 @@ var Init =
         rules.setRandomWeather(false);
         rules.setMoveVision(@MOVEVISION@);
         rules.setTransporterRefresh(@TRANSPORTERREFRESH@);
+        rules.setSpecialDestruction(@SPECIALDESTRUCTION@);
         rules.setCoUnits(false);
         rules.setNoPower(true);
         var limit = rules.getVictoryRule("VICTORYRULE_TURNLIMIT");

@@ -34,14 +34,30 @@ export class GameRules {
    * set", which is what the scripts test for.
    */
   getGameRule(_id: string): undefined { return undefined; }
-  getMoveVision(): boolean { return false; }
-  getSpecialDestruction(): boolean { return false; }
+  /**
+   * Three rules Commander Wars defaults to ON and this project to off. They
+   * are settings rather than constants so a game recorded by the real thing can
+   * be replayed under the rules it was played with (src/game/upstream.node.ts).
+   *
+   * moveVision: a moving unit reveals what it passes (not implemented here —
+   * the flag only reaches the scripts). specialDestruction: missiles, bombs and
+   * lasers may kill outright; off, they leave a unit at 0.1 HP.
+   * transporterRefresh: cargo is readied again at its transport's turn start.
+   */
+  moveVision = false;
+  specialDestruction = false;
+  transporterRefresh = false;
+  getMoveVision(): boolean { return this.moveVision; }
+  setMoveVision(value: boolean): void { this.moveVision = value; }
+  getSpecialDestruction(): boolean { return this.specialDestruction; }
+  setSpecialDestruction(value: boolean): void { this.specialDestruction = value; }
+  setTransporterRefresh(value: boolean): void { this.transporterRefresh = value; }
   getParallelCos(): boolean { return false; }
   /** gamerules.h: m_buildingVision{0} — a building lights only its own tile. */
   buildingVision = 0;
   getBuildingVision(): number { return this.buildingVision; }
   getResellValue(): number { return 0; }
-  getTransporterRefresh(): boolean { return false; }
+  getTransporterRefresh(): boolean { return this.transporterRefresh; }
   getPowerGainMode(): number { return 0; }
   getPowerLoose(): number { return 0; }
   getPowerUsageReduction(): number { return 0; }

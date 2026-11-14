@@ -67,7 +67,7 @@ export function planOffensive(game: Game, options: OffensiveOptions = {}): Offen
   const actors = player.units.filter(unit => !unit.getHasMoved() && unit.getHp() > 0
     && unit.hasAction('ACTION_FIRE') && visibleUnitAt(map, player, unit.x, unit.y) === unit)
     .filter(unit => {
-      const building = unit.getTerrain().getBuilding();
+      const building = unit.getTerrain()?.getBuilding();
       return !(building && isKnownBuilding(building, player) && building.getOwner() !== player
         && (building.getOwner() === null || player.isEnemy(building.getOwner())) && unit.hasAction('ACTION_CAPTURE'));
     });

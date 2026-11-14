@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import zlib from 'node:zlib';
 import { bootstrap } from '../src/game/bootstrap.node.ts';
 import { readRecord, trimRecord } from '../src/maps/recreader.ts';
-import { diffRecord, describeReport } from '../src/game/upstream.node.ts';
+import { diffRecord, describeReport, recordedOptions } from '../src/game/upstream.node.ts';
 
 export function loadRecordFile(file: string): Uint8Array {
   const bytes = fs.readFileSync(file);
@@ -42,14 +42,15 @@ if (positional[0] === '--trim') {
     `${(fs.statSync(output).size / 1024).toFixed(0)} KB${record.truncated ? ' (record was cut off; unfinished tail dropped)' : ''}`);
 } else if (positional[0]) {
   const record = readRecord(loadRecordFile(positional[0]));
-  const stamped = (record.info.ironAccord ?? {}) as { fog?: number };
-  const fog = flags.has('fog') ? Number(flags.get('fog')) : stamped.fog ?? 0;
+  const options = recordedOptions(record);
+  if (flags.has('fog')) options.fog = Number(flags.get('fog'));
+  const fog = options.fog ?? 0;
   const warnings = new Map<string, number>();
   console.warn = (...parts: unknown[]) => {
     const key = parts.map(p => (p instanceof Error ? p.message : String(p))).join(' ').split('\n')[0].slice(0, 160);
     warnings.set(key, (warnings.get(key) ?? 0) + 1);
   };
-  const report = diffRecord(bootstrap(), record, { fog });
+  const report = diffRecord(bootstrap(), record, options);
   console.log(`${positional[0]} (${String(record.info.mapName ?? '?')}, fog ${fog})`);
   console.log(describeReport(report, record, Number(flags.get('turns') ?? 5)));
   if (warnings.size > 0) {

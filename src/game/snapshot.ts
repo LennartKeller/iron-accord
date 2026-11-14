@@ -74,6 +74,12 @@ export interface GameState {
   terrain: TerrainState[];
   /** Next unit identity to hand out; see GameMap.getUnitUidCounter. */
   unitUidCounter: number;
+  /**
+   * Under shroud, which tiles each player has ever seen. Every other kind of
+   * vision is derived and recomputed on restore; this is not — without it a
+   * search that explores a line and rewinds would keep what it saw.
+   */
+  visionMemory?: Array<number[]> | null;
 }
 
 /** Rules state for a tile and its nested base terrain. */
@@ -178,6 +184,7 @@ export function snapshot(game: Game): GameState {
     buildings,
     terrain,
     unitUidCounter: map.getUnitUidCounter(),
+    visionMemory: map.vision.exportMemory(),
   };
 }
 
@@ -282,6 +289,7 @@ export function restore(game: Game, state: GameState): void {
     map.setUnitUidCounter(state.unitUidCounter);
   }
 
+  map.vision.importMemory(state.visionMemory);
   map.vision.update();
 }
 

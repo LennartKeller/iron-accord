@@ -45,12 +45,16 @@ export function loadIntoGameMap(
   const buildTerrain = (tile: MapTile, x: number, y: number): Terrain => {
     const terrain = new Terrain(map, x, y, tile.terrainID);
     terrain.palette = tile.palette;
-    terrain.hp = tile.hp;
     if (tile.baseTerrain) terrain.baseTerrain = buildTerrain(tile.baseTerrain, x, y);
     // Terrain::init() is where a script assigns its default biome palette when
     // the map did not store one; without it, mask sprites have nothing to
     // recolour through and render as raw palette indices.
     try { registry[tile.terrainID]?.init?.(terrain, map); } catch { /* optional */ }
+    // game/terrain.cpp: Terrain::deserializer runs init() and only then reads
+    // the stored hit points, which replace init's when both are positive — so
+    // for anything destructible the file has the last word. Setting them first
+    // let init() put a half-broken weld back to full strength.
+    if (tile.hp > 0 && terrain.hp > 0) terrain.hp = tile.hp;
     applyPaletteGroup(terrain, registry, mapPaletteGroup);
     return terrain;
   };

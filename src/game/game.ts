@@ -872,30 +872,58 @@ export class Game {
    * turn the constructor runs.
    */
   private beginTurn(player: Player, neutralTurn = true): void {
-    player.expireVisionFields();
-    player.funds += this.calcIncome(player);
+    const tiles = this.startOfTurnTiles();
 
-    for (let y = 0; y < this.map.height; y++) {
-      for (let x = 0; x < this.map.width; x++) {
-        const unit = this.map.getUnitAt(x, y);
-        if (unit && unit.getOwner() === player) unit.startOfTurn();
-
+    // game/gamemap.cpp: GameMap::nextTurn. On a new day the neutral pass comes
+    // first and on its own — terrain and unowned buildings, which is what
+    // spreads fires and grows plasma — and only then is the player paid and
+    // their own units and buildings run.
+    if (neutralTurn) {
+      for (const { x, y } of tiles) {
         const terrain = this.map.getTerrain(x, y);
+        terrain.startOfTurn();
         const building = terrain.getBuilding();
-        if (building && building.getOwner() === player) building.startOfTurn();
-
-        // game/gamemap.cpp: startOfTurnNeutral runs terrain and unowned
-        // buildings once per day — this is what spreads fires and grows plasma.
-        if (neutralTurn) {
-          terrain.startOfTurn();
-          if (building && building.getOwner() === null) building.startOfTurn();
-        }
+        if (building && building.getOwner() === null) building.startOfTurn();
       }
+    }
+
+    player.funds += this.calcIncome(player);
+    try { this.registry.PLAYER?.startOfTurn?.(player, this.map); } catch { /* optional */ }
+
+    // GameMap::startOfTurnPlayer: tile by tile, the unit and then the building.
+    for (const { x, y } of tiles) {
+      const unit = this.map.getUnitAt(x, y);
+      if (unit && unit.getOwner() === player) unit.startOfTurn();
+      const building = this.map.getTerrain(x, y).getBuilding();
+      if (building && building.getOwner() === player) building.startOfTurn();
     }
     this.animations?.flush(this.map);
     this.animations?.clearCreated();
     this.checkFuel(player);
     this.cleanupDead();
+  }
+
+  /**
+   * The order start-of-turn hooks visit the board in.
+   *
+   * Commander Wars draws this from the dice every turn (GameMap::
+   * startOfTurnPlayer shuffles the rows and the columns), and the order shows:
+   * with funds for one repair, whichever damaged unit is visited first gets it;
+   * a ship beside an APC ends the turn full or one short depending on whether
+   * it burns its daily fuel before or after being resupplied.
+   *
+   * This engine keeps a fixed order, so a position always evolves the same way.
+   * The differential replay sets `startOfTurnOrder` to try others, to tell a
+   * real disagreement from one that is only a different shuffle.
+   */
+  startOfTurnOrder: { rows: number[]; columns: number[] } | null = null;
+
+  private startOfTurnTiles(): Array<{ x: number; y: number }> {
+    const rows = this.startOfTurnOrder?.rows ?? Array.from({ length: this.map.height }, (_, y) => y);
+    const columns = this.startOfTurnOrder?.columns ?? Array.from({ length: this.map.width }, (_, x) => x);
+    const tiles: Array<{ x: number; y: number }> = [];
+    for (const y of rows) for (const x of columns) tiles.push({ x, y });
+    return tiles;
   }
 
   /**
@@ -937,6 +965,12 @@ export class Game {
     // spent to its enemy for a whole turn. Only units on the board: cargo keeps
     // its flag, exactly as enableUnits walks tiles and never looks inside a hold.
     for (const unit of player.units) unit.hasMoved = false;
+    // GameMap::nextPlayer opens with updatePlayerVision(true) for the player
+    // who is leaving: temporary reveals — a flare, the tile an ambush came from
+    // — count down as their owner's turn ENDS. A flare therefore lights the
+    // rest of that turn and nothing more; expiring at the start of the owner's
+    // next turn let it watch the opponent's whole move.
+    player.expireVisionFields();
   }
 
   /** Units of the current player that still have something to do. */

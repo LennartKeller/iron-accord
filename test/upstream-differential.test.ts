@@ -7,8 +7,9 @@ import { cwRoot } from '../src/cw/resources.node.ts';
 import { readMap } from '../src/maps/mapreader.ts';
 import { loadIntoGameMap } from '../src/maps/loadmap.ts';
 import { readRecord, trimRecord } from '../src/maps/recreader.ts';
-import { diffRecord, RecordedGameAction } from '../src/game/upstream.node.ts';
+import { diffRecord, recordedOptions, RecordedGameAction } from '../src/game/upstream.node.ts';
 import { Game } from '../src/game/game.ts';
+import { snapshot, restore } from '../src/game/snapshot.ts';
 import { gridFloor, HP_PRECISION } from '../src/host/precision.ts';
 
 const runtime = bootstrap();
@@ -21,20 +22,22 @@ const load = (name: string) => zlib.gunzipSync(fs.readFileSync(path.join(FIXTURE
  * per fixture, as `turn:kind`. Anything not listed fails the test — and so does
  * a listed entry that no longer occurs, so this cannot quietly go stale.
  */
-const KNOWN: Record<string, Record<string, string>> = {
-  'Agitated-fog0-ai2.rec.gz': {
-    // game/gamemap.cpp: GameMap::startOfTurnPlayer walks the tiles in an order
-    // drawn from the RNG. Here an APC resupplies the cannonboat beside it: when
-    // upstream happened to burn the boat's daily fuel first and resupply
-    // second it ended full; this engine scans in a fixed order and does the
-    // reverse. Reproducing it needs Qt's random stream, not a rules change.
-    '36:unit.fuel:CANNONBOAT': 'start-of-turn hook order is random upstream',
-  },
-};
+const KNOWN: Record<string, Record<string, string>> = {};
 
 describe('differential replay against Commander Wars', () => {
   it('has fixtures to check', () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(5);
+    expect(fixtures.length).toBeGreaterThanOrEqual(12);
+  });
+
+  it('settles a start-of-turn tie by trying other orders, and says so', () => {
+    // Coast Assault, day 7: funds for one repair and two damaged tanks. Commander
+    // Wars visits tiles in a shuffled order, so which tank it mends is a coin
+    // toss; the replay has to find the order upstream happened to draw.
+    const record = readRecord(load('Coast_Assault-fog0-ai2.rec.gz'));
+    const report = diffRecord(runtime, record, recordedOptions(record));
+    expect(report.orderDependent).toBeGreaterThan(0);
+    expect(report.exact).toBe(report.turns.length);
+    expect(report.turns.filter(turn => turn.orderDependent).every(turn => turn.differences.length === 0)).toBe(true);
   });
 
   // Each fixture is a game the real Commander Wars played, recorded with
@@ -42,8 +45,7 @@ describe('differential replay against Commander Wars', () => {
   // board and must end on upstream's next board.
   it.each(fixtures)('%s', name => {
     const record = readRecord(load(name));
-    const settings = (record.info.ironAccord ?? {}) as { fog?: number };
-    const report = diffRecord(runtime, record, { fog: settings.fog ?? 0 });
+    const report = diffRecord(runtime, record, recordedOptions(record));
 
     expect(record.truncated).toBe(false);
     expect(report.turns.length).toBeGreaterThan(10);
@@ -51,7 +53,7 @@ describe('differential replay against Commander Wars', () => {
     const observed = new Map<string, string>();
     for (const turn of report.turns) {
       for (const refused of turn.refused) observed.set(`${turn.index}:refused:${refused.actionID}`, `action ${refused.index}`);
-      for (const d of turn.differences) {
+      for (const d of [...turn.differences, ...turn.unoffered]) {
         observed.set(`${turn.index}:${d.kind}`,
           `${d.where}: Commander Wars has ${JSON.stringify(d.expected)}, this engine ${JSON.stringify(d.actual)}`);
       }
@@ -63,6 +65,55 @@ describe('differential replay against Commander Wars', () => {
     expect(unexpected, 'this engine departs from the real Commander Wars; ' +
       `inspect with: node tools/upstream-diff.ts test/fixtures/upstream/${name}`).toEqual([]);
     expect(stale, 'listed as a known difference but no longer occurs — remove it from KNOWN').toEqual([]);
+  });
+});
+
+// The offer check passes on every fixture, so prove it can fail: hand it
+// actions Commander Wars never performed and it has to object to each.
+describe('offer check', () => {
+  const pristine = () => readRecord(load('8-Bridge_Isles-fog0-ai2.rec.gz'));
+  const kindsOf = (record: ReturnType<typeof readRecord>) =>
+    new Set(diffRecord(runtime, record, { fog: 0 }).turns.flatMap(turn => turn.unoffered.map(d => d.kind)));
+
+  it('accepts every action the real game performed', () => {
+    expect([...kindsOf(pristine())]).toEqual([]);
+  });
+
+  it('objects to a move that costs something else', () => {
+    const record = pristine();
+    const move = record.actions.find(action => action.actionID === 'ACTION_WAIT' && action.path.length > 1)!;
+    move.costs += 1;
+    expect([...kindsOf(record)]).toContain('offer.cost:ACTION_WAIT');
+  });
+
+  it('objects to a destination the unit cannot reach', () => {
+    const record = pristine();
+    const move = record.actions.find(action => action.actionID === 'ACTION_WAIT' && action.path.length > 1)!;
+    // The corner furthest from where the unit stands.
+    const width = record.initial.header.width, height = record.initial.header.height;
+    const far = { x: move.target.x < width / 2 ? width - 1 : 0, y: move.target.y < height / 2 ? height - 1 : 0 };
+    move.path = [far, ...move.path];
+    expect([...kindsOf(record)].some(kind => /^offer\.(reach|stop|cost):ACTION_WAIT$/.test(kind))).toBe(true);
+  });
+
+  it('objects to an attack on a tile that holds no target', () => {
+    const record = pristine();
+    const fire = record.actions.find(action => action.actionID === 'ACTION_FIRE')!;
+    // The buffer opens with the target's x and y; aim at the attacker's own tile.
+    const aimed = new Uint8Array(fire.buffer);
+    const view = new DataView(aimed.buffer);
+    const own = fire.path[0] ?? fire.target;
+    view.setInt32(0, own.x, false);
+    view.setInt32(4, own.y, false);
+    fire.buffer = aimed;
+    expect([...kindsOf(record)]).toContain('offer.target:ACTION_FIRE');
+  });
+
+  it('objects to an action that is not on the unit\'s menu', () => {
+    const record = pristine();
+    const move = record.actions.find(action => action.actionID === 'ACTION_WAIT' && action.path.length > 1)!;
+    move.actionID = 'ACTION_CAPTURE';
+    expect([...kindsOf(record)].some(kind => kind.startsWith('offer.menu:ACTION_CAPTURE'))).toBe(true);
   });
 });
 
@@ -181,6 +232,85 @@ describe('rules corrected against Commander Wars', () => {
     const infantry = game.map.addUnit('INFANTRY', owner, 1, 0);
     owner.buildedUnit(infantry);
     expect(infantry.hidden).toBe(false);
+  });
+
+  it('lets a damaged structure stay damaged when a map is loaded', () => {
+    // Terrain::deserializer runs init() first and the stored hit points after.
+    const record = readRecord(load('Ocean_Prison-fog0-ai2.rec.gz'));
+    const snapshot = record.snapshots.find(candidate =>
+      candidate.map.tiles.flat().some(tile => tile.terrainID === 'WELD' && tile.hp > 0 && tile.hp < 100))!;
+    const stored = snapshot.map.tiles.flat().find(tile => tile.terrainID === 'WELD' && tile.hp > 0 && tile.hp < 100)!;
+    const map = loadIntoGameMap(snapshot.map, runtime.registry);
+    expect(map.getTerrain(stored.x, stored.y).hp).toBe(stored.hp);
+  });
+
+  it('gives a unit in a transport no terrain, so it pays no upkeep there', () => {
+    const game = newGame();
+    const owner = game.map.players[0];
+    const carrier = game.map.addUnit('AIRCRAFTCARRIER', owner, 0, 0);
+    const heli = game.map.addUnit('K_HELI', owner, 1, 0);
+    expect(heli.getTerrain()).not.toBeNull();
+    carrier.loadUnit(heli);
+    expect(heli.getTerrain()).toBeNull();
+    heli.setFuel(50);
+    carrier.startOfTurn();
+    // Refuelled by the carrier, and not then charged a helicopter's two a day.
+    expect(heli.getFuel()).toBe(heli.getMaxFuel());
+  });
+
+  it('remembers explored tiles under shroud, and a rewind forgets them again', () => {
+    const map = loadIntoGameMap(source, runtime.registry);
+    map.getGameRules().setFogMode(2);
+    const game = new Game(map, runtime.registry, runtime.animations);
+    const player = map.players[0];
+    const scout = player.units[0];
+    const grid = () => Array.from(map.vision.gridFor(player)!);
+    const before = snapshot(game);
+    const seenAtStart = grid();
+
+    // Find a tile in sight now that is out of sight once the scout has left.
+    const origin = { x: scout.x, y: scout.y };
+    scout.x = origin.x === 0 ? map.width - 1 : 0;
+    scout.y = origin.y === 0 ? map.height - 1 : 0;
+    map.vision.update();
+    const after = grid();
+    const left = seenAtStart.findIndex((type, at) => type === 2 && after[at] !== 2);
+    expect(left).toBeGreaterThanOrEqual(0);
+    // Player::updatePlayerVision: once seen, Fogged — never Shrouded again.
+    expect(after[left]).toBe(1);
+    expect(after.some(type => type === 0)).toBe(true);
+
+    // What a search saw while exploring a line must not survive the rewind.
+    const newlySeen = after.findIndex((type, at) => type === 2 && seenAtStart[at] === 0);
+    expect(newlySeen).toBeGreaterThanOrEqual(0);
+    restore(game, before);
+    expect(grid()).toEqual(seenAtStart);
+    expect(grid()[newlySeen]).toBe(0);
+  });
+
+  it('expires a temporary reveal when its owner\'s turn ends', () => {
+    // GameMap::nextPlayer ticks the LEAVING player's timers: a flare lights the
+    // rest of that turn, not the opponent's.
+    const map = loadIntoGameMap(source, runtime.registry);
+    map.getGameRules().setFogMode(1);
+    const game = new Game(map, runtime.registry, runtime.animations);
+    const player = map.players[0];
+    const hidden = Array.from(map.vision.gridFor(player)!).findIndex(type => type === 1);
+    const at = { x: hidden % map.width, y: Math.floor(hidden / map.width) };
+    player.addVisionField(at.x, at.y, 1, true);
+    expect(map.vision.getFieldVisible(player, at.x, at.y)).toBe(true);
+    game.endTurn();
+    expect(map.vision.getFieldVisible(player, at.x, at.y)).toBe(false);
+  });
+
+  it('visits start-of-turn tiles in the order it is given', () => {
+    const game = newGame();
+    expect(game.startOfTurnOrder).toBeNull();
+    const rows = Array.from({ length: game.map.height }, (_, y) => game.map.height - 1 - y);
+    const columns = Array.from({ length: game.map.width }, (_, x) => x);
+    game.startOfTurnOrder = { rows, columns };
+    game.endTurn();   // must still complete a hand-over
+    expect(game.currentPlayerIndex).toBe(1);
   });
 
   it('moves an ambushed unit onto the last free tile of a one-step route', () => {

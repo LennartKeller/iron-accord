@@ -387,6 +387,15 @@ export class Terrain {
     catch { /* optional */ }
   }
 
+  /**
+   * game/terrain.cpp: Terrain::getVision — how far this tile lights its
+   * surroundings for a player. -1, the script default, means it does not.
+   */
+  getVision(player?: unknown): number {
+    const value = this.map.registry[this.terrainID]?.getVision?.(player, this, this.map);
+    return typeof value === 'number' ? Math.trunc(value) : 0;
+  }
+
   getVisionHide(player?: unknown): boolean {
     const result = this.map.registry[this.terrainID]?.getVisionHide?.(this, player, this.map);
     return result === true;

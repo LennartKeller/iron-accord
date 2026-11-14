@@ -193,7 +193,18 @@ export class Unit {
    */
   getVirtualHp(): number { return this.virtualHp > 0 ? this.virtualHp : this.hp; }
   getVirtualHpValue(): number { return this.virtualHp; }
-  getTerrain(): Terrain { return this.map.getTerrain(this.x, this.y); }
+  /**
+   * game/unit.cpp: Unit::getTerrain — null for a unit that is not on the board.
+   *
+   * Cargo keeps the coordinates it had when it boarded, so answering with the
+   * tile there made a carried unit look like it was standing on it. The unit
+   * scripts ask exactly this to decide whether upkeep is due: a helicopter in a
+   * cruiser's hold was burning two fuel a day right after being refuelled.
+   */
+  getTerrain(): Terrain | null {
+    return this.map.onMap(this.x, this.y) && this.map.getUnitAt(this.x, this.y) === this
+      ? this.map.getTerrain(this.x, this.y) : null;
+  }
   getWeatherImmune(): boolean { return false; }
 
   /** game/unit.cpp: Unit::getUnitDamageID() — empty script result means "use my own id". */
@@ -911,6 +922,6 @@ export class Unit {
   hasTerrainHide(player: Player): boolean {
     if (this.map.getGameRules().getFogMode() === 0) return false;
     if (player.getFieldVisible(this.x, this.y)) return false;
-    return this.getTerrain().getVisionHide(player) && this.useTerrainHide();
+    return (this.getTerrain()?.getVisionHide(player) ?? false) && this.useTerrainHide();
   }
 }

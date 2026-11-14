@@ -83,6 +83,13 @@ export interface MapPlayer {
   buildList: string[];
   controlType: number;
   playerNameId: string;
+  /**
+   * What this player can see, as the game stored it: one entry per tile,
+   * row-major (`y * width + x`). Null in files written before fog was stored.
+   * `type` is a GameEnums.VisionType; `duration` and `direct` describe a
+   * temporary reveal (a flare, an ambush) laid over the computed vision.
+   */
+  vision: { width: number; height: number; type: Uint8Array; duration: Int32Array; direct: Uint8Array } | null;
 }
 
 export interface CommanderWarsMap {
@@ -289,7 +296,7 @@ function readPlayer(s: QDataStreamReader): MapPlayer {
 
   const player: MapPlayer = {
     color, funds: 0, fundsModifier: 0, army: '', team: 0, isDefeated: false,
-    cos: [null, null], buildList: [], controlType: 0, playerNameId: '',
+    cos: [null, null], buildList: [], controlType: 0, playerNameId: '', vision: null,
   };
   if (version <= 1) return player;
 
@@ -307,17 +314,25 @@ function readPlayer(s: QDataStreamReader): MapPlayer {
     readGameInput(s, version);
   }
   if (version > 5) {
+    // game/player.cpp writes m_FogVisionFields column by column.
     const width = s.int32();
     const height = s.int32();
+    const vision = {
+      width, height, type: new Uint8Array(width * height),
+      duration: new Int32Array(width * height), direct: new Uint8Array(width * height),
+    };
     for (let x = 0; x < width; x++) {
       for (let y = 0; y < height; y++) {
-        if (version > 10) s.int32();
-        else if (version > 8) s.bool();
-        else s.int32();
-        s.int32();                    // duration
-        if (version > 8) s.bool();    // directView
+        const at = y * width + x;
+        // Before version 11 the field was a plain "visible" flag.
+        if (version > 10) vision.type[at] = s.int32();
+        else if (version > 8) vision.type[at] = s.bool() ? 2 : 1;
+        else vision.type[at] = s.int32() ? 2 : 1;
+        vision.duration[at] = s.int32();
+        if (version > 8) vision.direct[at] = s.bool() ? 1 : 0;
       }
     }
+    if (width > 0 && height > 0) player.vision = vision;
   }
 
   if (version > 17) player.buildList = s.stringList();

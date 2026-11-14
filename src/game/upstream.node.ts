@@ -18,6 +18,9 @@
  * variables, timed bonuses, cloak timers, fog vision fields) is rebuilt from
  * defaults at the top of each turn, and rules upstream has that this engine
  * does not (weather, unit ranks, COs) must be switched off when recording.
+ * Before each action is performed it is also checked that this engine would
+ * have OFFERED it — reachable, on the menu, same cost — since agreeing on an
+ * action's effects says nothing about whether an agent could have chosen it.
  * See docs/upstream-differential.md.
  *
  * Node-only: reads records through the map reader.
@@ -74,7 +77,7 @@ export interface Difference {
 }
 
 export interface TurnResult {
-  /** Index of the snapshot this turn starts from. */
+  /** Which player-turn of the game this is; 0 is the opening turn. */
   index: number;
   day: number;
   player: number;
@@ -84,18 +87,33 @@ export interface TurnResult {
   /** Actions this engine would not perform. */
   refused: Array<{ index: number; actionID: string }>;
   /**
+   * Actions the real game performed that this engine would not have OFFERED a
+   * player or an agent: unreachable, missing from the menu, priced differently.
+   * They are still performed as recorded, so the turn can be compared anyway.
+   */
+  unoffered: Difference[];
+  /**
    * Differences between the board this engine rebuilt from upstream's snapshot
    * and that same snapshot — i.e. state the loader cannot represent. They are
    * not counted against the turn, but explain differences that follow.
    */
   loadDifferences: Difference[];
   differences: Difference[];
+  /**
+   * True when the board only matched under a different start-of-turn order
+   * than this engine's. Commander Wars shuffles that order every turn, so such
+   * a turn agrees with upstream as far as anything short of sharing its dice
+   * can show; `differences` is then empty.
+   */
+  orderDependent: boolean;
 }
 
 export interface DifferentialReport {
   turns: TurnResult[];
   /** Turns with no refused action and no difference. */
   exact: number;
+  /** Of those, the ones that needed another start-of-turn order to match. */
+  orderDependent: number;
   actions: number;
   /** Occurrences per difference kind, across all turns. */
   kinds: Map<string, number>;
@@ -104,6 +122,57 @@ export interface DifferentialReport {
 export interface DifferentialOptions {
   /** The fog mode the game was recorded under; the reader skips the rule block. */
   fog?: number;
+  /**
+   * Rules the recording was made under. A record stamps these when it is
+   * trimmed; where it does not, the values are what tools/upstream/record.sh
+   * has always used: special destruction left at Commander Wars' default (on),
+   * the other two switched off.
+   */
+  specialDestruction?: boolean;
+  moveVision?: boolean;
+  transporterRefresh?: boolean;
+}
+
+function applyRules(map: ReturnType<typeof loadIntoGameMap>, options: DifferentialOptions): void {
+  const rules = map.getGameRules();
+  rules.setFogMode(options.fog ?? 0);
+  rules.setSpecialDestruction(options.specialDestruction ?? true);
+  rules.setMoveVision(options.moveVision ?? false);
+  rules.setTransporterRefresh(options.transporterRefresh ?? false);
+}
+
+/** The settings a trimmed record carries, as options. */
+export function recordedOptions(record: UpstreamRecord): DifferentialOptions {
+  const stamped = (record.info.ironAccord ?? {}) as Record<string, unknown>;
+  const flag = (key: string) => typeof stamped[key] === 'boolean' ? stamped[key] as boolean : undefined;
+  return {
+    fog: typeof stamped.fog === 'number' ? stamped.fog : 0,
+    specialDestruction: flag('specialDestruction'),
+    moveVision: flag('moveVision'),
+    transporterRefresh: flag('transporterRefresh'),
+  };
+}
+
+/** How many start-of-turn orders to try before a difference is taken as real. */
+const ORDER_ATTEMPTS = 48;
+
+/** A seeded Fisher-Yates over 0..n-1, so a report is the same every run. */
+function shuffler(seed: number): (n: number) => number[] {
+  let state = seed >>> 0 || 1;
+  const next = () => {
+    state ^= state << 13; state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5; state >>>= 0;
+    return state / 0x100000000;
+  };
+  return n => {
+    const order = Array.from({ length: n }, (_, i) => i);
+    for (let i = n - 1; i > 0; i--) {
+      const j = Math.floor(next() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    return order;
+  };
 }
 
 /** Upstream writes HP on a 0.01 grid; one step of slack absorbs the rounding. */
@@ -111,10 +180,97 @@ const HP_TOLERANCE = 0.0101;
 
 function gameAt(runtime: Runtime, snapshot: RecordedSnapshot, options: DifferentialOptions): Game {
   const map = loadIntoGameMap(snapshot.map, runtime.registry);
-  map.getGameRules().setFogMode(options.fog ?? 0);
+  applyRules(map, options);
+  // Temporary reveals (a flare, an ambush) are state, not something vision can
+  // be recomputed from: carry the ones still running into the resumed game.
+  snapshot.map.players.forEach((player, index) => {
+    const vision = player.vision;
+    if (!vision) return;
+    for (let at = 0; at < vision.duration.length; at++) {
+      if (vision.duration[at] <= 0) continue;
+      map.players[index]?.addVisionField(at % vision.width, Math.floor(at / vision.width), vision.duration[at], vision.direct[at] === 1);
+    }
+  });
+  // Under shroud, what each player has explored is state too.
+  map.vision.importMemory(snapshot.map.players.map(player => player.vision?.type ?? []));
   return new Game(map, runtime.registry, runtime.animations, {
     resume: { day: snapshot.day, currentPlayer: snapshot.player },
   });
+}
+
+/**
+ * The game as it starts. A record's first map is taken before anyone's first
+ * turn has begun, so this goes through the ordinary constructor — which is the
+ * point: the opening turn then also checks the first income and upkeep.
+ */
+function gameAtStart(runtime: Runtime, record: UpstreamRecord, options: DifferentialOptions): Game {
+  const map = loadIntoGameMap(record.initial, runtime.registry);
+  applyRules(map, options);
+  return new Game(map, runtime.registry, runtime.animations);
+}
+
+/**
+ * Would this engine have offered the action upstream performed?
+ *
+ * Performing a recorded action as given only shows that the EFFECTS agree. An
+ * agent never gets that far unless the action is first reachable, on the menu
+ * and priced the same — which is where the engine once let units fire from
+ * tiles they could not reach. This asks the same questions the UI and the
+ * action enumeration ask, before the action is performed.
+ *
+ * One-sided by nature: a record holds what Commander Wars allowed, never what
+ * it refused, so this cannot show the engine offering too much.
+ */
+function offered(game: Game, recorded: RecordedAction): Difference | null {
+  const { actionID, target } = recorded;
+  // Not a choice: the engine substitutes ACTION_TRAP itself, and ending the
+  // turn is always available.
+  if (actionID === 'ACTION_NEXT_PLAYER' || actionID === 'ACTION_TRAP') return null;
+
+  const { map } = game;
+  const where = `${target.x},${target.y}`;
+  const miss = (reason: string, expected: unknown, actual: unknown): Difference =>
+    ({ kind: `offer.${reason}:${actionID}`, where, expected, actual });
+  const input = new QDataStreamReader(recorded.buffer.buffer, recorded.buffer.byteOffset, recorded.buffer.byteLength);
+
+  if (actionID === 'ACTION_BUILD_UNITS') {
+    if (!game.canProduceAt(target.x, target.y)) return miss('site', 'can produce here', 'cannot');
+    const unitID = input.string();
+    const option = game.buildOptions(map.getTerrain(target.x, target.y).getBuilding()!).find(entry => entry.id === unitID);
+    if (!option) return miss('unit', unitID, 'not on the build menu');
+    if (option.cost !== recorded.costs) return miss('price', recorded.costs, option.cost);
+    if (!option.affordable) return miss('funds', `can afford ${unitID}`, 'cannot');
+    return null;
+  }
+
+  const unit = map.onMap(target.x, target.y) ? map.getUnitAt(target.x, target.y) : null;
+  if (!unit || (recorded.path.length === 0 && !unit.getActionList().includes(actionID))) {
+    // Nothing moves: an order given to a building.
+    return game.probeBuildingAction(target, actionID).kind === 'invalid'
+      ? miss('building', 'available', 'not available') : null;
+  }
+
+  const range = game.select(unit.x, unit.y);
+  try {
+    if (!range) return miss('control', 'unit can be ordered', 'cannot');
+    const destination = recorded.path[0] ?? target;
+    const tile = range.tiles.get(`${destination.x},${destination.y}`);
+    if (!tile) return miss('reach', `reaches ${destination.x},${destination.y}`, 'unreachable');
+    if (!tile.canAct) return miss('stop', `can act at ${destination.x},${destination.y}`, 'cannot');
+    if (tile.cost !== recorded.costs) return miss('cost', recorded.costs, tile.cost);
+    if (!game.availableActions(unit, destination).some(option => option.id === actionID)) {
+      return miss('menu', 'on the action menu', 'missing');
+    }
+    if (actionID === 'ACTION_FIRE') {
+      const aim = { x: input.int32(), y: input.int32() };
+      if (!game.attackTargets(unit, destination).some(t => t.x === aim.x && t.y === aim.y)) {
+        return miss('target', `can attack ${aim.x},${aim.y}`, 'not a target');
+      }
+    }
+    return null;
+  } finally {
+    game.clearSelection();
+  }
 }
 
 function perform(game: Game, recorded: RecordedAction): boolean {
@@ -183,6 +339,25 @@ export function compareWithSnapshot(game: Game, snapshot: RecordedSnapshot): Dif
     }
   });
 
+  // What each player can see. With fog off Commander Wars answers "everything"
+  // without consulting the stored fields, so they carry nothing to compare.
+  if (map.getGameRules().getFogMode() !== 0) {
+    const names = ['shrouded', 'fogged', 'clear', 'mist'];
+    snapshot.map.players.forEach((player, index) => {
+      const theirs = player.vision;
+      const ours = map.vision.gridFor(map.players[index]);
+      if (!theirs || !ours || theirs.width !== map.width || theirs.height !== map.height) return;
+      for (let at = 0; at < ours.length; at++) {
+        if (theirs.type[at] === ours[at]) continue;
+        out.push({
+          kind: `vision:${names[theirs.type[at]] ?? theirs.type[at]}-seen-as-${names[ours[at]] ?? ours[at]}`,
+          where: `player ${index} at ${at % map.width},${Math.floor(at / map.width)}`,
+          expected: names[theirs.type[at]] ?? theirs.type[at], actual: names[ours[at]] ?? ours[at],
+        });
+      }
+    });
+  }
+
   for (let y = 0; y < map.height; y++) {
     for (let x = 0; x < map.width; x++) {
       const where = `${x},${y}`;
@@ -212,29 +387,75 @@ export function compareWithSnapshot(game: Game, snapshot: RecordedSnapshot): Dif
   return out;
 }
 
+/**
+ * Commander Wars writes a turn's opening snapshot as the first action of that
+ * turn is submitted — after ActionPerformer::doTrapping has already run on it.
+ * So when that first action is an ambush, the reveal of the ambusher's tile is
+ * in the snapshot although the action has not been performed. Mirror it, or the
+ * boards differ by one tile of vision that has nothing to do with the rules.
+ */
+function anticipateOpeningAmbush(game: Game, next: RecordedAction | undefined): void {
+  if (next?.actionID !== 'ACTION_TRAP' || next.buffer.byteLength < 8) return;
+  const input = new QDataStreamReader(next.buffer.buffer, next.buffer.byteOffset, next.buffer.byteLength);
+  game.currentPlayer.addVisionField(input.int32(), input.int32(), 1, true);
+}
+
 /** Replays every player-turn of a record with this engine and reports where it departs. */
 export function diffRecord(runtime: Runtime, record: UpstreamRecord, options: DifferentialOptions = {}): DifferentialReport {
-  const report: DifferentialReport = { turns: [], exact: 0, actions: record.actions.length, kinds: new Map() };
+  const report: DifferentialReport = { turns: [], exact: 0, orderDependent: 0, actions: record.actions.length, kinds: new Map() };
 
-  for (let index = 0; index + 1 < record.snapshots.length; index++) {
-    const from = record.snapshots[index];
-    const to = record.snapshots[index + 1];
-    const game = gameAt(runtime, from, options);
+  // Turn 0 runs from the starting map to the first snapshot; turn k from
+  // snapshot k-1 to snapshot k.
+  for (let index = 0; index < record.snapshots.length; index++) {
+    const from = index === 0 ? null : record.snapshots[index - 1];
+    const to = record.snapshots[index];
+    const game = from ? gameAt(runtime, from, options) : gameAtStart(runtime, record, options);
+    // Commander Wars opens a match with ACTION_NEXT_PLAYER: the hand-over INTO
+    // the first turn, which pays the first income. Constructing a Game does
+    // exactly that, so the record's leading action is already accounted for.
+    const firstAction = from ? from.actionCount
+      : record.actions[0]?.actionID === 'ACTION_NEXT_PLAYER' ? 1 : 0;
     const turn: TurnResult = {
-      index, day: from.day, player: from.player,
-      firstAction: from.actionCount, lastAction: to.actionCount - 1,
-      refused: [], loadDifferences: compareWithSnapshot(game, from), differences: [],
+      index, day: game.day, player: game.currentPlayerIndex,
+      firstAction, lastAction: to.actionCount - 1,
+      refused: [], unoffered: [], loadDifferences: from ? compareWithSnapshot(game, from) : [], differences: [],
+      orderDependent: false,
     };
 
-    for (let i = from.actionCount; i < to.actionCount; i++) {
+    for (let i = firstAction; i < to.actionCount; i++) {
       const recorded = record.actions[i];
       if (!recorded) break;
+      const missing = offered(game, recorded);
+      if (missing) turn.unoffered.push({ ...missing, where: `action ${i} at ${missing.where}` });
       if (!perform(game, recorded)) turn.refused.push({ index: i, actionID: recorded.actionID });
     }
+    anticipateOpeningAmbush(game, record.actions[to.actionCount]);
     turn.differences = compareWithSnapshot(game, to);
 
-    if (turn.refused.length === 0 && turn.differences.length === 0) report.exact++;
-    for (const difference of turn.differences) {
+    // The turn ends by handing over, which runs the next player's start-of-turn
+    // hooks in an order upstream shuffles. Before calling a difference real,
+    // see whether another order produces upstream's board exactly.
+    if (turn.differences.length > 0 && turn.refused.length === 0) {
+      const shuffle = shuffler(0x9e3779b9 ^ index);
+      for (let attempt = 0; attempt < ORDER_ATTEMPTS; attempt++) {
+        const retry = from ? gameAt(runtime, from, options) : gameAtStart(runtime, record, options);
+        retry.startOfTurnOrder = {
+          rows: shuffle(retry.map.height), columns: shuffle(retry.map.width),
+        };
+        let performed = true;
+        for (let i = firstAction; i < to.actionCount && performed; i++) performed = perform(retry, record.actions[i]);
+        if (performed) anticipateOpeningAmbush(retry, record.actions[to.actionCount]);
+        if (performed && compareWithSnapshot(retry, to).length === 0) {
+          turn.differences = [];
+          turn.orderDependent = true;
+          report.orderDependent++;
+          break;
+        }
+      }
+    }
+
+    if (turn.refused.length === 0 && turn.differences.length === 0 && turn.unoffered.length === 0) report.exact++;
+    for (const difference of [...turn.differences, ...turn.unoffered]) {
       report.kinds.set(difference.kind, (report.kinds.get(difference.kind) ?? 0) + 1);
     }
     for (const refused of turn.refused) {
@@ -248,15 +469,16 @@ export function diffRecord(runtime: Runtime, record: UpstreamRecord, options: Di
 
 export function describeReport(report: DifferentialReport, record: UpstreamRecord, showTurns = 5): string {
   const lines = [
-    `${report.turns.length} player-turns, ${report.actions} actions: ${report.exact} turns reproduce exactly, ` +
-      `${report.turns.length - report.exact} differ`,
+    `${report.turns.length} player-turns, ${report.actions} actions: ${report.exact} turns reproduce exactly` +
+      (report.orderDependent ? ` (${report.orderDependent} under another start-of-turn order)` : '') +
+      `, ${report.turns.length - report.exact} differ`,
   ];
   if (report.kinds.size > 0) {
     lines.push('difference kinds: ' + [...report.kinds].sort((a, b) => b[1] - a[1]).map(([kind, n]) => `${kind} x${n}`).join(', '));
   }
   let shown = 0;
   for (const turn of report.turns) {
-    if (turn.refused.length === 0 && turn.differences.length === 0) continue;
+    if (turn.refused.length === 0 && turn.differences.length === 0 && turn.unoffered.length === 0) continue;
     if (shown++ >= showTurns) break;
     const acts = new Set(record.actions.slice(turn.firstAction, turn.lastAction + 1).map(a => a.actionID.replace('ACTION_', '')));
     lines.push(`turn ${turn.index}: day ${turn.day} player ${turn.player}, actions ${turn.firstAction}..${turn.lastAction} (${[...acts].join(', ')})`);
@@ -264,6 +486,9 @@ export function describeReport(report: DifferentialReport, record: UpstreamRecor
       lines.push(`  already differs after loading the snapshot: ${[...new Set(turn.loadDifferences.map(d => d.kind))].join(', ')}`);
     }
     for (const refused of turn.refused.slice(0, 4)) lines.push(`  refused action ${refused.index} ${refused.actionID}`);
+    for (const d of turn.unoffered.slice(0, 6)) {
+      lines.push(`  not offered: ${d.where} ${d.kind}: Commander Wars ${JSON.stringify(d.expected)}, this engine ${JSON.stringify(d.actual)}`);
+    }
     for (const d of turn.differences.slice(0, 8)) {
       lines.push(`  ${d.where} ${d.kind}: expected ${JSON.stringify(d.expected)}, got ${JSON.stringify(d.actual)}`);
     }
