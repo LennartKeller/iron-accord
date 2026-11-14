@@ -12,7 +12,9 @@
     "test:browser": "playwright test",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "build:data": "node tools/build-data.ts"
+    "build:data": "node tools/build-data.ts",
+    "golden:check": "node tools/golden-replays.ts",
+    "golden:update": "node tools/golden-replays.ts --update"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

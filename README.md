@@ -79,7 +79,21 @@ npm run typecheck
 npx playwright install chromium  # one-time browser download
 npm run build
 npm run test:browser   # production desktop + mobile regression tests
+npm run golden:check   # do the recorded games still reproduce? (also part of npm test)
+npm run golden:update  # accept a deliberate rules change and re-record them
 ```
+
+**Golden replays pin the rules.** `test/fixtures/golden-replays.jsonl.gz` holds 40
+recorded games with a digest of the position after every action and of the legal
+action set at every turn. `npm test` replays them, so any change to what the engine
+produces — damage, movement, vision, luck consumption, what is legal — fails there
+first, naming the game, the action and the part of the state that moved. If the
+change was intended, `npm run golden:update` reports where each old game departs and
+re-records the set; commit the fixture with the change. Self-play data recorded
+before such a change no longer replays and has to be regenerated — which is exactly
+what went unnoticed in September 2026, when two fixes invalidated a month of
+training games without a single test failing. Bumping the Commander_Wars submodule
+can trip it too, and should.
 
 Browser tests require generated `data/` and a production build. If the build uses
 `IRON_ACCORD_BASE=/iron-accord/`, pass that same environment variable to
