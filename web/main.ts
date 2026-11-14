@@ -7,6 +7,9 @@ import { PointerControls } from '../src/input/pointer.ts';
 import { unitVisibleToViewer } from '../src/render/visibility.ts';
 import { terrainAt, type Scene } from '../src/maps/scene.ts';
 import { drawOverview, overviewCell } from '../src/ui/minimap.ts';
+import { SoundPlayer } from '../src/ui/sound.ts';
+import { soundBus } from '../src/host/sound.ts';
+import { snapshot, restore, type GameState } from '../src/game/snapshot.ts';
 import { actionableTiles } from '../src/game/pathfinding.ts';
 import { assetFileName } from '../src/cw/assetname.ts';
 import { bootstrapBrowser } from '../src/game/bootstrap.browser.ts';
@@ -191,6 +194,118 @@ function requestRender(): void {
     else if (wasAnimating) syncTurn();
   });
 }
+
+// --- sound --------------------------------------------------------------------
+
+const SOUND_KEY = 'iron-accord.sound';
+const sound = new SoundPlayer(file => asset(`sounds/${file}`));
+try { sound.enabled = localStorage.getItem(SOUND_KEY) !== 'off'; } catch { /* storage unavailable */ }
+// Audio may only start from a gesture; the first touch or key unlocks it.
+for (const type of ['pointerdown', 'keydown'] as const) {
+  window.addEventListener(type, () => sound.unlock(), { passive: true });
+}
+
+/**
+ * A sound the rule scripts asked for. Engine noises are loops meant to run as
+ * long as a walk animation does; ours is brief, so they are cut short.
+ */
+function scriptedSound(file: string): void {
+  sound.play(file, { maxSeconds: file.startsWith('move') ? 0.7 : 1.6, gain: file.startsWith('move') ? 0.6 : 1 });
+}
+
+// --- undo ---------------------------------------------------------------------
+
+interface Checkpoint {
+  state: GameState;
+  rng: number;
+  /** Enemy units the player to move could see, by identity. */
+  seen: Set<number>;
+}
+
+/** The position after the last completed action, or at the start of the turn. */
+let checkpoint: Checkpoint | null = null;
+/** Positions that can be gone back to, oldest first. Cleared whenever something irreversible happens. */
+const undoStack: Checkpoint[] = [];
+let undoTurn = '';
+const undoButton = $<HTMLButtonElement>('#undo');
+
+function takeCheckpoint(): Checkpoint | null {
+  if (!game || !rng) return null;
+  const mover = game.currentPlayer;
+  const seen = new Set<number>();
+  for (const unit of game.map.units) {
+    if (mover.isEnemyUnit(unit) && unitVisibleToViewer(unit, mover)) seen.add(unit.uid);
+  }
+  return { state: snapshot(game), rng: rng.getState(), seen };
+}
+
+/**
+ * Whether going from `before` to `after` may be taken back.
+ *
+ * Undo is for a slip of the finger, not for peeking. So an action stays
+ * undoable only while it taught the player nothing: no dice were rolled (the
+ * random stream did not move, which rules out every attack), no enemy came
+ * into view, no ambush was sprung, and under shroud no new ground was
+ * uncovered. Moving, waiting, loading, capturing and building all qualify.
+ */
+function reversible(before: Checkpoint, after: Checkpoint): boolean {
+  if (after.state.over || before.rng !== after.rng) return false;
+  for (const uid of after.seen) if (!before.seen.has(uid)) return false;
+  const mover = before.state.currentPlayerIndex;
+  if ((after.state.players[mover]?.visionFields.length ?? 0) > (before.state.players[mover]?.visionFields.length ?? 0)) {
+    return false;
+  }
+  const was = before.state.visionMemory?.[mover], now = after.state.visionMemory?.[mover];
+  if (was && now) {
+    for (let i = 0; i < now.length; i++) if (was[i] === 0 && now[i] !== 0) return false;
+  }
+  return true;
+}
+
+/** Called when the turn changes hands or a match starts: nothing before this can be undone. */
+function resetUndo(): void {
+  undoStack.length = 0;
+  checkpoint = takeCheckpoint();
+  syncUndo();
+}
+
+/** Called after each of the player's own actions. */
+function recordUndo(): void {
+  const before = checkpoint;
+  const after = takeCheckpoint();
+  checkpoint = after;
+  if (!before || !after) { undoStack.length = 0; syncUndo(); return; }
+  // Cancelling a menu ends up here too; a position that did not change is not a step.
+  if (JSON.stringify(before.state) === JSON.stringify(after.state)) return;
+  if (reversible(before, after)) undoStack.push(before);
+  else undoStack.length = 0;
+  syncUndo();
+}
+
+function syncUndo(): void {
+  const available = undoStack.length > 0 && !aiRunning && !currentSeatIsAI() && !game?.over;
+  undoButton.hidden = !available;
+}
+
+function undo(): void {
+  if (!game || !rng || aiRunning || sceneLoading || currentSeatIsAI() || game.over) return;
+  const previous = undoStack.pop();
+  if (!previous) return;
+  renderer.clearAnimations();
+  restore(game, previous.state);
+  rng.setState(previous.rng);
+  checkpoint = previous;
+  resetInteraction();
+  syncBuildings();
+  syncUnits();
+  syncTurn();
+  autosave();
+  statusEl.textContent = 'Move undone';
+  sound.play('cancel.wav');
+  syncUndo();
+  requestRender();
+}
+undoButton.addEventListener('click', undo);
 
 // --- overview ---------------------------------------------------------------
 
@@ -509,6 +624,14 @@ function syncTurn(): void {
   }
   renderHud();
   announceTurn();
+  const turnKey = `${sceneLoadVersion}:${game.day}:${game.currentPlayerIndex}`;
+  if (turnKey !== undoTurn) {
+    const started = undoTurn !== '' && undoTurn.startsWith(`${sceneLoadVersion}:`);
+    undoTurn = turnKey;
+    resetUndo();
+    if (started && !currentSeatIsAI() && !game.over) sound.play('player_turn.wav');
+  }
+  syncUndo();
   endTurnButton.hidden = false;
   const pending = game.pendingUnits().length;
   endTurnButton.textContent = 'End turn';
@@ -727,7 +850,7 @@ function openMenu(screen: { x: number; y: number }, items: MenuItem[]): void {
       button.append(cost);
     }
     if (item.disabled) button.disabled = true;
-    else button.addEventListener('click', () => { closeMenu(); item.run?.(); });
+    else button.addEventListener('click', () => { sound.play('okay.wav', { gain: 0.7 }); closeMenu(); item.run?.(); });
     return button;
   }));
   menuEl.hidden = false;
@@ -793,7 +916,15 @@ function resetInteraction(): void {
 function presentAction<T>(unit: Unit | null, to: { x: number; y: number } | null, run: () => T): T {
   if (!game) return run();
   const finish = captureFeedback(game, renderer.liveUnits ?? [], unit, to);
-  const result = run();
+  // The scripts' sounds are heard only for an action the person watching may
+  // witness: their own, or one by a unit they can see. Anything else — and
+  // every action an AI merely considers — runs with no listener.
+  const watcher = fogViewer();
+  const audible = !currentSeatIsAI() || !fogEnabled() || !watcher
+    || (unit !== null && unitVisibleToViewer(unit, watcher));
+  soundBus.sink = audible ? scriptedSound : null;
+  let result: T;
+  try { result = run(); } finally { soundBus.sink = null; }
   const feedback = finish();
   syncBuildings();
   syncUnits();
@@ -810,6 +941,12 @@ function presentAction<T>(unit: Unit | null, to: { x: number; y: number } | null
     const occupant = game.map.getUnitAt(effect.x, effect.y);
     if (occupant && !unitVisibleToViewer(occupant, viewer)) continue;
     renderer.addEffect(effect.x, effect.y, effect.text, effect.color, duration);
+    // Cues for what the scripts leave to Commander Wars' battle and capture
+    // screens, which this game does not have.
+    if (effect.text === 'TRAP!') sound.play('trap.wav');
+    else if (effect.text === 'CAPTURED') sound.play('capture_ally.wav');
+    else if (effect.text.startsWith('CAPTURE')) sound.play('capture.wav', { maxSeconds: 1.2 });
+    else if (effect.text.endsWith('HP')) sound.play('cannon_weapon_fire.wav', { gain: 0.8 });
   }
   requestRender();
   return result;
@@ -934,6 +1071,7 @@ function afterTurnAction(): void {
   syncBuildings();
   syncUnits();
   syncTurn();
+  recordUndo();
   checkBanner();
   autosave();
   requestRender();
@@ -1236,6 +1374,15 @@ nextUnitButton.addEventListener('click', cycleToNextUnit);
 observerButton.addEventListener('click', cycleObserver);
 
 window.addEventListener('keydown', event => {
+  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;
+  const dialogOpen = picker.open || setup.open || settingsDialog.open;
+  if (!typing && !dialogOpen && !event.repeat && !event.altKey
+      && (((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z')
+        || (!event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'u'))) {
+    undo();
+    event.preventDefault();
+    return;
+  }
   if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
   // Ignore keys typed into the map search box.
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
@@ -1260,6 +1407,7 @@ function checkBanner(): void {
   $('#banner-text').textContent = over.reason === 'hq-captured' ? 'Enemy HQ captured.'
     : over.reason === 'no-units' ? 'All enemy forces eliminated.'
     : ruleNameFor(over.ruleID);
+  if (bannerEl.hidden) sound.play('victory.wav');
   bannerEl.hidden = false;
 }
 /** Names the rule that ended it, using the script's own wording. */
@@ -1766,6 +1914,14 @@ $<HTMLInputElement>('#optGrid').addEventListener('change', e => {
   renderer.showGrid = (e.target as HTMLInputElement).checked;
   requestRender();
 });
+const soundToggle = $<HTMLInputElement>('#optSound');
+soundToggle.checked = sound.enabled;
+soundToggle.addEventListener('change', () => {
+  sound.enabled = soundToggle.checked;
+  try { localStorage.setItem(SOUND_KEY, sound.enabled ? 'on' : 'off'); } catch { /* storage unavailable */ }
+  if (sound.enabled) { sound.unlock(); sound.play('okay.wav'); }
+});
+
 $<HTMLInputElement>('#optDim').addEventListener('change', e => {
   options.dimSpent = (e.target as HTMLInputElement).checked;
   syncUnits();

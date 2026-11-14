@@ -77,6 +77,17 @@ export const GameEnums: Record<string, number> = {
   Fog_OfShroud: 2,
   Fog_OfMist: 3,
 
+  // game/GameEnums.h: MapFilterFlags — what a map's author says it is about.
+  // The AI's production reads three of them to decide whether to build a navy
+  // or an air force at all.
+  MapFilterFlags_None: 0x0, MapFilterFlags_Bases: 0x1, MapFilterFlags_Airport: 0x2,
+  MapFilterFlags_Harbour: 0x4, MapFilterFlags_Tower: 0x8, MapFilterFlags_Teleport: 0x10,
+  MapFilterFlags_MixedBase: 0x20, MapFilterFlags_Predeployed: 0x40, MapFilterFlags_Symetric: 0x80,
+  MapFilterFlags_PvP: 0x100, MapFilterFlags_FTA: 0x200, MapFilterFlags_VsAi: 0x400,
+  MapFilterFlags_TeamPlay: 0x800, MapFilterFlags_Historical: 0x1000, MapFilterFlags_LowFunds: 0x2000,
+  MapFilterFlags_HighFunds: 0x4000, MapFilterFlags_Naval: 0x8000, MapFilterFlags_Ground: 0x10000,
+  MapFilterFlags_Air: 0x20000, MapFilterFlags_Scripted: 0x40000, MapFilterFlags_Amphibious: 0x80000,
+
   Alliance_Friend: 0,
   Alliance_Enemy: 1,
 

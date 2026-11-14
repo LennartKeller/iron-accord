@@ -172,6 +172,7 @@ for (const file of files) {
       width: map.width,
       height: map.height,
       category,
+      mapFlags: map.mapFlags,
       // Teams come from the loaded map, not the file: loadIntoGameMap applies the
       // same index-default that Commander Wars applies when a game starts.
       players: source.players.map((p, i) => ({
@@ -274,6 +275,44 @@ fs.writeFileSync(path.join(scenesDir, 'index.json'), JSON.stringify(index));
     if (spriteIndex.has(id) && !usedSprites.has(id)) { usedSprites.add(id); added++; }
   }
   console.log(`status badge icons added: ${added}`);
+}
+
+// --- sounds -------------------------------------------------------------------
+// The rule scripts name the sounds they want (animation.setSound, audio.playSound);
+// those, plus a few interface cues, are what ships. Fetched on first use, never
+// precached: together they are several megabytes of WAV.
+{
+  const soundsDir = path.join(outRoot, 'sounds');
+  fs.rmSync(soundsDir, { recursive: true, force: true });
+  fs.mkdirSync(soundsDir, { recursive: true });
+  const wanted = new Set<string>([
+    'selectunit.wav', 'okay.wav', 'cancel.wav', 'player_turn.wav', 'victory.wav',
+    'capture.wav', 'capture_ally.wav', 'capture_enemy.wav', 'cannon_weapon_fire.wav',
+    'mg_weapon_fire.wav', 'trap.wav', 'placeBuilding.wav', 'impossible.wav',
+  ]);
+  const scriptsRoot = path.join(cwRoot(), 'resources/scripts');
+  const pattern = /(?:playSound|setSound|addSound)\("([^"]+\.wav)"/g;
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // COs and their powers are not part of this game.
+        if (entry.name !== 'cos' && entry.name !== 'co_perks') walk(full);
+      } else if (entry.name.endsWith('.js')) {
+        for (const match of fs.readFileSync(full, 'utf8').matchAll(pattern)) wanted.add(match[1]);
+      }
+    }
+  };
+  walk(scriptsRoot);
+  let count = 0, bytes = 0;
+  for (const name of [...wanted].sort()) {
+    const source = path.join(cwRoot(), 'resources/sounds', name);
+    if (!fs.existsSync(source)) continue;
+    fs.copyFileSync(source, path.join(soundsDir, name));
+    count++;
+    bytes += fs.statSync(source).size;
+  }
+  console.log(`sounds      : ${count} files  ${(bytes / 1048576).toFixed(2)} MB`);
 }
 
 // --- copy only the sprites those scenes reference -------------------------

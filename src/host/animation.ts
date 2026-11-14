@@ -1,4 +1,5 @@
 import type { ScriptRegistry } from '../scripts/types.ts';
+import { requestSound } from './sound.ts';
 
 /** Where `attach` parks the runner so `Game` can find it without being told. */
 export const ANIMATION_RUNNER_KEY = '__ironAccordAnimationRunner';
@@ -53,6 +54,11 @@ export class FakeAnimation {
   readDataFloat(): number { return Number(this.data[this.readCursor++] ?? 0); }
 
   queueAnimation(next: FakeAnimation): FakeAnimation { return next; }
+
+  // The one part of an animation's presentation that is not visual: scripts
+  // name the sound that goes with it. See src/host/sound.ts for who hears it.
+  setSound(file: unknown): void { requestSound(file); }
+  addSound(file: unknown): void { requestSound(file); }
 
   /**
    * Work the engine does when this animation ends, before its end-of-animation

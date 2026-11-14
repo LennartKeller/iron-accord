@@ -1,3 +1,5 @@
+import { requestSound } from './sound.ts';
+
 /**
  * Free functions Commander Wars scripts expect on the sandbox global,
  * registered by Interpreter in coreengine/interpreter.cpp.
@@ -136,7 +138,7 @@ export function makeAnimationStubs(runner?: { factory(): unknown }) {
     GameAnimationFactory: runner
       ? runner.factory()
       : new Proxy({}, { get: () => () => inert() }),
-    audio: { playSound() {}, stopSound() {} },
+    audio: { playSound(file: unknown) { requestSound(file); }, stopSound() {} },
     GameConsole: new Proxy({}, { get: () => () => {} }),
   };
 }

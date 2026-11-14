@@ -52,6 +52,7 @@
     <span class="spacer"></span>
     <span id="turn" class="turn"></span>
     <button id="observer" class="chip" type="button" hidden title="Whose vision the board is drawn under (V)">👁 All</button>
+    <button id="undo" class="chip" type="button" hidden title="Take back your last move (U)">Undo</button>
     <button id="nextunit" class="chip" type="button" hidden title="Next unmoved unit (N)">Next</button>
     <button id="endturn" class="chip chip--primary" type="button" hidden>End turn</button>
     <button id="fit" class="chip" type="button">Fit</button>
@@ -63,6 +64,7 @@
     <div class="settings">
       <label><input id="optGrid" type="checkbox" /> Show grid</label>
       <label><input id="optDim" type="checkbox" checked /> Dim spent units</label>
+      <label><input id="optSound" type="checkbox" checked /> Sound</label>
       <p id="saveStatus" class="settings__note">Completed actions and turns are saved on this device. Reload to resume.</p>
       <p class="settings__note">Fog and opponents are chosen when a game starts.</p>
     </div>

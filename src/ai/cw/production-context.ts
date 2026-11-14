@@ -66,8 +66,9 @@ export function createProductionContext(
     getMapWidth: () => game.map.getMapWidth(),
     getMapHeight: () => game.map.getMapHeight(),
     getGameRules: () => game.map.getGameRules(),
-    // Map filter flags are not retained by this host; do not infer them from factories.
-    hasMapFlags: (_flags: number) => false,
+    // game/gamemap.cpp: GameMap::hasMapFlags. The policy asks for the naval, air
+    // and ground flags before it will commit to ships or aircraft.
+    hasMapFlags: (flags: number) => game.map.hasMapFlags(flags),
   };
   const policyPlayer = {
     getCO: (index: number) => player.getCO(index),

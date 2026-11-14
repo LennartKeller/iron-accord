@@ -37,6 +37,15 @@ export class GameMap {
   readonly vision: VisionMap = new VisionMap(this);
   /** Set by Game; scripts ask the map whose turn it is. */
   currentPlayerIndex = 0;
+
+  /**
+   * The map's filter flags, as its header stores them (GameEnums.MapFilterFlags).
+   * They describe the map rather than change any rule, but Commander Wars' AI
+   * reads them: without the naval flag it builds no ships on a map whose two
+   * sides only meet by sea, and both armies sit on their own shore.
+   */
+  mapFlags = 0;
+  hasMapFlags(flags: number): boolean { return (this.mapFlags & flags) !== 0; }
   private unitUidCounter = 0;
   currentDay = 1;
 

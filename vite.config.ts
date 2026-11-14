@@ -4,7 +4,7 @@ import path from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 
 /** Only generated runtime assets belong in the site; data/ also holds training runs. */
-const runtimeEntries = ['scripts.json', 'scenes', 'sprites', 'colortables'];
+const runtimeEntries = ['scripts.json', 'scenes', 'sprites', 'colortables', 'sounds'];
 
 export function runtimeDataAssets(dataDir = path.resolve('data')): Plugin {
   return {

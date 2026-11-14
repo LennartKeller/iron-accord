@@ -222,3 +222,41 @@ test('coordinated opponent is separate from Commander Wars and survives save/res
   expect((await savedGame(page)).agentStates).toEqual(before.agentStates);
   expect(errors).toEqual([]);
 });
+
+test('undo takes back a move, but not an attack, and actions make sound', async ({ page }) => {
+  const sounds: string[] = [];
+  page.on('request', request => {
+    const match = /\/sounds\/([^/?]+\.wav)/.exec(request.url());
+    if (match) sounds.push(match[1]);
+  });
+  await openGame(page);
+  await startGame(page);
+  const undo = page.locator('#undo');
+  await expect(undo).toBeHidden();
+
+  // A plain move can be taken back: the unit returns and is ready again.
+  await tapTile(page, 1, 3);
+  await tapTile(page, 2, 3);
+  await page.locator('#menu').getByRole('button', { name: 'Wait', exact: true }).click();
+  await expect(page.locator('#nextunit')).toHaveText('Next (1)');
+  await expect(undo).toBeVisible();
+  await undo.click();
+  await expect(page.locator('#nextunit')).toHaveText('Next (2)');
+  await expect(undo).toBeHidden();
+  const restored = await savedGame(page);
+  expect(restored.state.units.find(u => u.owner === 0 && u.x === 1 && u.y === 3)?.hasMoved).toBe(false);
+  expect(restored.state.units.some(u => u.owner === 0 && u.x === 2)).toBe(false);
+
+  // The walk asked for its sound, and the menu for its click.
+  await expect.poll(() => sounds.some(name => name.startsWith('move'))).toBe(true);
+  expect(sounds).toContain('okay.wav');
+
+  // An attack rolls dice, so there is nothing to take back afterwards.
+  await tapTile(page, 3, 3);
+  await tapTile(page, 4, 3);
+  await page.locator('#menu').getByRole('button', { name: 'Fire', exact: true }).click();
+  await tapTile(page, 5, 3);
+  await page.getByRole('button', { name: 'Fire', exact: true }).last().click();
+  await expect(page.locator('#nextunit')).toHaveText('Next (1)');
+  await expect(undo).toBeHidden();
+});

@@ -50,6 +50,8 @@ export interface Scene {
   width: number;
   height: number;
   category: string;
+  /** GameEnums.MapFilterFlags from the map header; absent in scenes built before it was kept. */
+  mapFlags?: number;
   players: ScenePlayer[];
 
   /** Palette: every sprite id this scene draws. */

@@ -25,6 +25,7 @@ export function loadIntoGameMap(
   mapPaletteGroup: number = DEFAULT_MAP_PALETTE_GROUP,
 ): GameMap {
   const map = new GameMap(source.header.width, source.header.height, 'PLAINS', registry);
+  map.mapFlags = Number(source.header.mapFlags & 0xffffffffn);
   map.spriteIndex = spriteIndex;
 
   // game/gamemap.cpp:2996 and objects/playerselection.cpp:428 both do

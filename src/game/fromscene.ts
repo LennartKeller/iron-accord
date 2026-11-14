@@ -19,6 +19,7 @@ export function gameMapFromScene(
   config?: GameConfig,
 ): GameMap {
   const map = new GameMap(scene.width, scene.height, scene.terrainIds[0] ?? 'PLAINS', registry);
+  map.mapFlags = scene.mapFlags ?? 0;
 
   if (config) {
     map.getGameRules().setFogMode(FOG_MODES[config.fog]);
