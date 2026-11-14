@@ -25,6 +25,7 @@
  *
  * Node-only: reads records through the map reader.
  */
+import { GameEnums } from '../host/enums.ts';
 import { GameAction } from '../host/gameaction.ts';
 import type { Unit } from '../host/unit.ts';
 import { QDataStreamReader } from '../maps/qdatastream.ts';
@@ -131,6 +132,8 @@ export interface DifferentialOptions {
   specialDestruction?: boolean;
   moveVision?: boolean;
   transporterRefresh?: boolean;
+  /** Left at the engine's default unless a test wants to see the damage check object. */
+  damageFormula?: number;
 }
 
 function applyRules(map: ReturnType<typeof loadIntoGameMap>, options: DifferentialOptions): void {
@@ -139,6 +142,7 @@ function applyRules(map: ReturnType<typeof loadIntoGameMap>, options: Differenti
   rules.setSpecialDestruction(options.specialDestruction ?? true);
   rules.setMoveVision(options.moveVision ?? false);
   rules.setTransporterRefresh(options.transporterRefresh ?? false);
+  if (options.damageFormula !== undefined) rules.setDamageFormula(options.damageFormula);
 }
 
 /** The settings a trimmed record carries, as options. */
@@ -265,6 +269,30 @@ function offered(game: Game, recorded: RecordedAction): Difference | null {
       const aim = { x: input.int32(), y: input.int32() };
       if (!game.attackTargets(unit, destination).some(t => t.x === aim.x && t.y === aim.y)) {
         return miss('target', `can attack ${aim.x},${aim.y}`, 'not a target');
+      }
+      // Commander Wars rolls an attack's damage when the order is given and
+      // stores it in the action, and replay applies the stored numbers. So
+      // replay alone never runs the damage formula: the stored damage has to
+      // be checked against what this engine would have rolled, which is any
+      // value between the least and the most that luck allows.
+      const dealt = input.int32();
+      input.int32();                      // which weapon
+      const returned = input.int32();
+      const fire = game.registry.ACTION_FIRE as unknown as {
+        calcBattleDamage3(...args: unknown[]): { x: number; width: number };
+      };
+      const predict = (attackerLuck: number, defenderLuck: number) => fire.calcBattleDamage3(
+        map, null, unit, 0, destination.x, destination.y, null, aim.x, aim.y, 0, attackerLuck, defenderLuck);
+      const weak = predict(GameEnums.LuckDamageMode_Min, GameEnums.LuckDamageMode_Max);
+      const strong = predict(GameEnums.LuckDamageMode_Max, GameEnums.LuckDamageMode_Min);
+      // One point of slack: the stored values are integers.
+      if (dealt < Math.floor(weak.x) - 1 || dealt > Math.ceil(strong.x) + 1) {
+        return miss('damage', dealt, `${weak.x.toFixed(1)}..${strong.x.toFixed(1)}`);
+      }
+      // The counter is weakest after the strongest hit, and the other way round.
+      const least = Math.min(weak.width, strong.width), most = Math.max(weak.width, strong.width);
+      if (returned < Math.floor(least) - 1 || returned > Math.ceil(most) + 1) {
+        return miss('counter', returned, `${least.toFixed(1)}..${most.toFixed(1)}`);
       }
     }
     return null;

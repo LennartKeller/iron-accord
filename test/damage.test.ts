@@ -70,20 +70,31 @@ describe('ACTION_FIRE damage pipeline', () => {
     const attacker = new Unit(map, 'INFANTRY', os, 0, 0);
 
     // game/unit.cpp: bonus += terrainDefense * rules.terrainDefense * (hpRounded / 10)
-    // general/weapon.js: damage = hp/10 * (base * off)/100 * ((200 - def)/100)
+    // general/weapon.js, the Advance Wars 4 formula Commander Wars defaults to:
+    //   damage = hp/10 * base * off / def      -- cover divides, it is not subtracted
     for (const [terrain, hp, expected] of [
-      ['PLAINS', 10, 49.5],
-      ['PLAINS', 5, 52.25],
-      ['FOREST', 10, 38.5],
-      ['FOREST', 5, 46.75],
-      ['MOUNTAIN', 10, 33.0],
-      ['MOUNTAIN', 5, 44.0],
+      ['PLAINS', 10, 5500 / 110],
+      ['PLAINS', 5, 5500 / 105],
+      ['FOREST', 10, 5500 / 130],
+      ['FOREST', 5, 5500 / 115],
+      ['MOUNTAIN', 10, 5500 / 140],
+      ['MOUNTAIN', 5, 5500 / 120],
     ] as Array<[string, number, number]>) {
       map.setTerrainID(1, 1, terrain);
       const defender = new Unit(map, 'INFANTRY', bm, 1, 1);
       defender.setHp(hp);
       expect(calcDamage(map, attacker, 'WEAPON_INFANTRY_MG', defender)).toBeCloseTo(expected, 6);
     }
+  });
+
+  it('still offers the older subtractive formula as a rule', () => {
+    const map = freshMap();
+    map.getGameRules().setDamageFormula(GameEnums.DamageFormula_AdvanceWars1_3);
+    const attacker = new Unit(map, 'INFANTRY', map.getPlayer(0)!, 0, 0);
+    map.setTerrainID(1, 1, 'FOREST');
+    const defender = new Unit(map, 'INFANTRY', map.getPlayer(1)!, 1, 1);
+    // damage = hp/10 * (base * off)/100 * ((200 - def)/100)
+    expect(calcDamage(map, attacker, 'WEAPON_INFANTRY_MG', defender)).toBeCloseTo(38.5, 6);
   });
 
   it('reads terrain defense stars from the terrain scripts', () => {

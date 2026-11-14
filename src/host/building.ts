@@ -96,6 +96,10 @@ export class BuildingHost {
     const value = this.map.registry[this.buildingID]?.getDefensiveBonus?.(this, this.map);
     return typeof value === 'number' ? value : 0;
   }
+  getOffensiveBonus(): number {
+    const value = this.map.registry[this.buildingID]?.getOffensiveBonus?.(this, this.map);
+    return typeof value === 'number' ? Math.trunc(value) : 0;
+  }
 
   getOffensiveFieldBonus(
     action: unknown, attacker: unknown, atkPosition: { x: number; y: number },

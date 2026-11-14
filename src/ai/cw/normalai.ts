@@ -99,7 +99,13 @@ export class NormalAi implements Agent {
   constructor(options: NormalAiOptions = {}) {
     this.config = { ...NORMAL_AI_DEFAULTS, ...options.config };
     this.name = options.name ?? 'normalai';
-    this.rngState = (options.seed ?? 1) >>> 0 || 1;
+    // xorshift32 leaves a small seed's first few draws close to zero, and a draw
+    // close to zero always buys the first unit of a production group. Seeds are
+    // usually small (1, 2, 3 ...), so mix the bits before the first draw.
+    let mixed = ((options.seed ?? 1) >>> 0) + 0x9e3779b9;
+    mixed = Math.imul(mixed ^ (mixed >>> 16), 0x85ebca6b);
+    mixed = Math.imul(mixed ^ (mixed >>> 13), 0xc2b2ae35);
+    this.rngState = (mixed ^ (mixed >>> 16)) >>> 0 || 1;
     this.production = new ProductionSystem(() => this.random());
   }
 

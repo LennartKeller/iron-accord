@@ -11,6 +11,7 @@ import { diffRecord, recordedOptions, RecordedGameAction } from '../src/game/ups
 import { Game } from '../src/game/game.ts';
 import { snapshot, restore } from '../src/game/snapshot.ts';
 import { gridFloor, HP_PRECISION } from '../src/host/precision.ts';
+import { GameEnums, BuildingHost } from '../src/host/index.ts';
 
 const runtime = bootstrap();
 const FIXTURES = path.resolve(import.meta.dirname, 'fixtures/upstream');
@@ -107,6 +108,24 @@ describe('offer check', () => {
     view.setInt32(4, own.y, false);
     fire.buffer = aimed;
     expect([...kindsOf(record)]).toContain('offer.target:ACTION_FIRE');
+  });
+
+  // An attack carries the damage Commander Wars rolled, and replay applies it
+  // as stored. Without these two the damage formula would never be exercised.
+  it('objects to an attack that hits harder than luck allows', () => {
+    const record = pristine();
+    const fire = record.actions.find(action => action.actionID === 'ACTION_FIRE')!;
+    const edited = new Uint8Array(fire.buffer);
+    const view = new DataView(edited.buffer);
+    view.setInt32(8, view.getInt32(8, false) + 40, false);
+    fire.buffer = edited;
+    expect([...kindsOf(record)]).toContain('offer.damage:ACTION_FIRE');
+  });
+
+  it('objects when the engine prices cover with the other damage formula', () => {
+    const kinds = new Set(diffRecord(runtime, pristine(), { fog: 0, damageFormula: GameEnums.DamageFormula_AdvanceWars1_3 })
+      .turns.flatMap(turn => turn.unoffered.map(d => d.kind)));
+    expect([...kinds]).toContain('offer.damage:ACTION_FIRE');
   });
 
   it('objects to an action that is not on the unit\'s menu', () => {
@@ -232,6 +251,40 @@ describe('rules corrected against Commander Wars', () => {
     const infantry = game.map.addUnit('INFANTRY', owner, 1, 0);
     owner.buildedUnit(infantry);
     expect(infantry.hidden).toBe(false);
+  });
+
+  it('adds ten percent to every attack for each tower the owner holds', () => {
+    const game = newGame();
+    const [owner, enemy] = game.map.players;
+    const attacker = game.map.addUnit('INFANTRY', owner, 0, 0);
+    const defender = game.map.addUnit('INFANTRY', enemy, 1, 0);
+    const bonus = () => attacker.getBonusOffensive(null, { x: 0, y: 0 }, defender, { x: 1, y: 0 }, false, GameEnums.LuckDamageMode_Off);
+    const before = bonus();
+    // game/unit.cpp: Unit::getBonusOffensive sums Building::getOffensiveBonus
+    // over everything the owner holds, wherever it stands.
+    const site = game.map.getTerrain(0, 1);
+    const tower = new BuildingHost(game.map, 'TOWER', owner);
+    site.building = tower;
+    tower.setTerrain(site);
+    expect(bonus()).toBe(before + 10);
+    tower.setOwner(enemy);
+    expect(bonus()).toBe(before);
+  });
+
+  it('takes a terrain\'s attack modifier from the tile the unit stands on, not the one it fires from', () => {
+    const game = newGame();
+    const [owner, enemy] = game.map.players;
+    game.map.setTerrainID(0, 0, 'DESERT');      // -20 to attacks, terrain/DESERT.js
+    game.map.setTerrainID(1, 0, 'PLAINS');
+    const attacker = game.map.addUnit('LIGHT_TANK', owner, 0, 0);
+    const defender = game.map.addUnit('INFANTRY', enemy, 2, 0);
+    const from = (x: number) => attacker.getBonusOffensive(null, { x, y: 0 }, defender, { x: 2, y: 0 }, false, GameEnums.LuckDamageMode_Off);
+    // Commander Wars prices an attack before the unit moves and reads
+    // m_pTerrain: driving off the sand to fire does not shed the penalty.
+    expect(from(1)).toBe(from(0));
+    expect(from(0)).toBe(-20);
+    attacker.moveUnitToField(1, 0);
+    expect(from(1)).toBe(0);
   });
 
   it('lets a damaged structure stay damaged when a map is loaded', () => {

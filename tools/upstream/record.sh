@@ -8,6 +8,8 @@
 # fog: 0 off, 1 fog of war, 2 shroud, 3 mist.   ai: 1 very easy, 2 normal, 5 heavy.
 # Needs an X server the game can draw to; Xvfb is used if it is on PATH or in $XVFB.
 # OUT_DIR redirects the fixture (default test/fixtures/upstream); see sweep.sh.
+# INIT_TEMPLATE swaps the startup script and PROBE_LOG keeps what it prints; see
+# "Looking inside the real AI" in the doc.
 set -euo pipefail
 
 MAP="${1:?map path below the Commander Wars root, e.g. maps/2_player/Agitated.map}"
@@ -37,7 +39,7 @@ sed -e "s|@MAPDIR@|$(dirname "$MAP")/|" -e "s|@MAPFILE@|$(basename "$MAP")|" \
     -e "s|@FOG@|$FOG|" -e "s|@DAYS@|$DAYS|" -e "s|@AI@|$AI|" \
     -e "s|@MOVEVISION@|$MOVEVISION|" -e "s|@TRANSPORTERREFRESH@|$TRANSPORTERREFRESH|" \
     -e "s|@SPECIALDESTRUCTION@|$SPECIALDESTRUCTION|" \
-    "$ROOT/tools/upstream/init.template.js" > "$WORK/init.js"
+    "${INIT_TEMPLATE:-$ROOT/tools/upstream/init.template.js}" > "$WORK/init.js"
 
 # The game announces the end of the match in its console log but does not exit
 # in headless mode, so it is stopped once the marker appears. TIMEOUT bounds a
@@ -56,6 +58,11 @@ pkill -P "$GAME_PID" 2>/dev/null || true
 kill "$GAME_PID" 2>/dev/null || true
 wait "$GAME_PID" 2>/dev/null || true
 [ "$FINISHED" = 1 ] || echo "the game did not reach its turn limit within ${TIMEOUT}s; keeping what was recorded" >&2
+
+# A probing template (see init.probe.template.js) prints lines worth keeping.
+if [ -n "${PROBE_LOG:-}" ]; then
+  grep -a "PROBE " "$WORK/console.log" | sed -e 's/^.*PROBE //' -e 's/ File:  Line: 0 Function: *$//' > "$PROBE_LOG" || true
+fi
 
 REC="$(ls "$WORK"/data/records/*.rec 2>/dev/null | head -1 || true)"
 [ -n "$REC" ] || { echo "no record was written; last console lines:" >&2; tail -5 "$WORK/console.log" >&2 || true; exit 1; }

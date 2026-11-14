@@ -45,8 +45,10 @@ it('distributes projected damage once per turn and preserves it across cache reb
   const randomBefore = rng.getState();
   cache.refresh(game, player);
   // Two unique defenders split the one ally's projected damage: 6 * HP / 2.
+  // Both stand on one star of cover, which divides the hit by 1.1.
   const damage = () => cache.enemyUnits.map(data => data.virtualDamageData);
-  expect(damage()).toEqual([7.65 * 3, 5.4 * 3]);
+  expect(damage()[0]).toBeCloseTo(8.5 / 1.1 * 3, 9);
+  expect(damage()[1]).toBeCloseTo(6 / 1.1 * 3, 9);
   const initial = damage();
   cache.refresh(game, player);
   expect(damage()).toEqual(initial);

@@ -236,7 +236,7 @@ export class Unit {
   /**
    * game/unit.cpp: Unit::getBonusDefensive(...)
    * Implemented: terrain defense (with the HP-reduction malus), field bonuses,
-   * weather. Not yet implemented: CO bonuses, owned-building bonuses, ranking.
+   * weather, owned-building bonuses. Not implemented: CO bonuses, ranking.
    */
   getBonusDefensive(
     action: unknown, position: QPoint, attacker: Unit | null, atkPosition: QPoint,
@@ -252,11 +252,16 @@ export class Unit {
              * hpReductionMalus;
     }
     bonus += this.defensiveBonus.reduce((sum, entry) => sum + entry.value, 0);
-    const terrain = this.map.getTerrain(position.x, position.y);
-    const building = terrain.getBuilding();
-    bonus += building
-      ? building.getDeffensiveFieldBonus(action, attacker, atkPosition, this, position, isAttacker, luckMode)
-      : terrain.getDeffensiveFieldBonus(action, attacker, atkPosition, this, position, isAttacker, luckMode);
+    // The field bonus comes from the tile the unit STANDS on (m_pTerrain), not
+    // from `position`: an attack is priced before the unit moves, so a tank
+    // leaving a desert forest still fights with that tile's modifier.
+    const terrain = this.getTerrain();
+    if (terrain !== null) {
+      const building = terrain.getBuilding();
+      bonus += building
+        ? building.getDeffensiveFieldBonus(action, attacker, atkPosition, this, position, isAttacker, luckMode)
+        : terrain.getDeffensiveFieldBonus(action, attacker, atkPosition, this, position, isAttacker, luckMode);
+    }
 
     // Owned buildings elsewhere on the map can add a flat defensive bonus.
     for (let y = 0; y < this.map.height; y++) {
@@ -278,13 +283,27 @@ export class Unit {
     isDefender: boolean, luckMode: number,
   ): number {
     let bonus = 0;
-    const terrain = this.map.getTerrain(position.x, position.y);
-    const building = terrain.getBuilding();
-    bonus += building
-      ? building.getOffensiveFieldBonus(action, this, position, defender, defPosition, isDefender, luckMode)
-      : terrain.getOffensiveFieldBonus(action, this, position, defender, defPosition, isDefender, luckMode);
+    // As in getBonusDefensive: the tile the unit stands on, not `position`.
+    const terrain = this.getTerrain();
+    if (terrain !== null) {
+      const building = terrain.getBuilding();
+      bonus += building
+        ? building.getOffensiveFieldBonus(action, this, position, defender, defPosition, isDefender, luckMode)
+        : terrain.getOffensiveFieldBonus(action, this, position, defender, defPosition, isDefender, luckMode);
+    }
     // Timed buffs from support units and CO powers.
     bonus += this.offensiveBonus.reduce((sum, entry) => sum + entry.value, 0);
+    // Unit::getUnitBonusOffensive: the unit script's own say.
+    const own = this.map.registry[this.unitID]?.getBonusOffensive?.(
+      this, position.x, position.y, defender, defPosition.x, defPosition.y, isDefender, action, luckMode, this.map);
+    if (typeof own === 'number') bonus += Math.trunc(own);
+    // Every building the owner holds can add a flat bonus -- a tower's +10.
+    for (let y = 0; y < this.map.height; y++) {
+      for (let x = 0; x < this.map.width; x++) {
+        const owned = this.map.getTerrain(x, y).getBuilding();
+        if (owned && owned.getOwner() === this.owner) bonus += owned.getOffensiveBonus();
+      }
+    }
     if (!this.getWeatherImmune()) {
       bonus += this.map.getGameRules().getCurrentWeather().getOffensiveModifier();
     }

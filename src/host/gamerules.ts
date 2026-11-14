@@ -14,7 +14,9 @@ export interface VictoryOutcome {
 
 /** Defaults mirror game/gamerules.h member initialisers. */
 export class GameRules {
-  damageFormula: number = GameEnums.DamageFormula_AdvanceWars1_3;
+  // gamerules.h: m_damageFormula{DamageFormula_AdvanceWars4}. Terrain cover
+  // divides damage in this formula; in the older one it is subtracted.
+  damageFormula: number = GameEnums.DamageFormula_AdvanceWars4;
   terrainDefense = 10;        // gamerules.h: quint8 m_terrainDefense{10}
   hpDefenseReduction = true;  // gamerules.h: bool m_hpDefenseReduction{true}
   rankingSystem = false;

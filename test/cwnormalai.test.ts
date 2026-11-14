@@ -120,13 +120,13 @@ describe('NormalAi', () => {
       factory.setTerrain(terrain);
       map.addUnit('INFANTRY', enemy, 19, 1);
       const env = new GameEnvironment(map, registry, { maxDays: 20, seed: 3, rng });
-      const retained = new NormalAi({ seed: 3 });
+      const retained = new NormalAi({ seed: 4 });
       const built: string[] = [];
       let saved: unknown;
       for (let day = 0; day < 10; day++) {
         player.funds = 100_000;
         for (const unit of player.units) unit.hasMoved = true;
-        const ai = recreate ? new NormalAi({ seed: 3 }) : retained;
+        const ai = recreate ? new NormalAi({ seed: 4 }) : retained;
         if (recreate === 'resume' && saved) ai.loadState(JSON.parse(JSON.stringify(saved)));
         ai.beginTurn(env);
         const action = await ai.selectAction(env);

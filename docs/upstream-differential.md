@@ -97,6 +97,13 @@ under them:
   alone; the report flags a turn that already differed on load.
 - **Anything drawn from the dice during an action**, other than attack damage
   and the start-of-turn order. Without COs and weather there is little of it.
+- **The exact damage of an attack.** Commander Wars rolls it when the order is
+  given and stores it in the action; replay applies the stored numbers, so the
+  board matches whatever formula this engine has. The offer check therefore
+  prices every recorded attack itself and requires the stored damage and
+  counter to lie between the least and the most that luck allows. That bounds
+  the formula to within the luck range, which was enough to catch a wrong
+  formula, a missing tower bonus and a misplaced terrain modifier at once.
 - **Whatever the AI never does.** The traces are AI-vs-AI games, so an action
   only a person would try is not covered. Across 45 games nothing fired a
   cannon or laser building, for example.
@@ -109,6 +116,29 @@ Two quirks of the record itself are accounted for rather than hidden: the game
 opens with a hand-over action into the first turn (constructing a `Game` does
 the same), and a turn's opening snapshot is written after the first action's
 ambush check has already revealed the ambusher's tile.
+
+## Looking inside the real AI
+
+The record shows what the real AI did, not why. But everything its AI knows
+about a fight it learns from one script function, `ACTION_FIRE.calcBattleDamage3`,
+and the startup script runs in the same interpreter — so it can wrap that
+function and print every question and answer:
+
+```sh
+INIT_TEMPLATE=tools/upstream/init.probe.template.js PROBE_LOG=/tmp/probe.log OUT_DIR=/tmp \
+CW_APPRUN=... tools/upstream/record.sh "maps/2_player/Mouse Island.map" 0 9 2 probe
+node tools/upstream-ai-probe.ts /tmp/probe.rec.gz /tmp/probe.log
+```
+
+`tools/upstream-ai-probe.ts` replays the NormalAi port from each recorded
+position and compares the answers it gets to the same questions. Threat
+estimates should agree without exception. A few attack estimates differ once
+the two AIs' turns have drifted apart (the same question about a unit one side
+has already damaged); a rule difference shows as most of them differing.
+
+The same trick works for any other script function the C++ calls. It is how a
+port that matched the real AI action for action over single turns, yet stalled
+in whole games, was traced to two causes in an afternoon (see below).
 
 ## After moving the submodule
 
@@ -137,3 +167,22 @@ by this replay and since fixed; all 1,144 turns now match.
 
 Not a rule difference but found the same way: upstream's start-of-turn order is
 random, which decided seven of the 1,144 turns (see above).
+
+Later the same day, 60 games. Games between two Commander Wars AIs went stale
+in this engine — armies piling up, few attacks — while the real game finished
+the same maps in 20 to 30 days. Single turns replayed from the real game's
+positions matched it, so the cause had to be something replay could not see:
+
+| Difference | Cause |
+|---|---|
+| Every attack on a unit in cover did less damage than in the real game | `GameRules::m_damageFormula` defaults to the Advance Wars 4 formula, in which cover divides damage (`off / def`); this engine used the older one that subtracts it |
+| Attacks by a player holding a tower were 10% short | `Unit::getBonusOffensive` adds `Building::getOffensiveBonus` for every building the owner holds |
+| A tank driving off desert to fire lost the desert's penalty, and one driving onto it gained it | Field bonuses come from the tile the unit stands on (`m_pTerrain`), and an attack is priced before the unit moves |
+| The NormalAi port saw danger on tiles the real AI walks onto | `CoreAI::calcVirtuelUnitDamage` defaults to the script's fast-inaccurate mode: no terrain, fixed luck, and the threatened unit's counter-attack always netted in, so a weak attacker reads as no threat |
+
+The first three were invisible to replay because a recorded attack carries its
+own damage; the offer check now prices it (see "What it cannot see"). The last
+is not an engine rule at all and was found with the probe above. Mouse Island,
+eight games each: before, four were undecided after 60 days and the earliest
+win came on day 41; after, all eight are decided, five of them by day 30. The
+real game: seven of seven decided, six by day 27.

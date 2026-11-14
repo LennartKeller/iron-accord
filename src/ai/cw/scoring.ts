@@ -167,6 +167,10 @@ export function calculateCounterDamage(
     enemyDamage *= config.enemyCounterDamageMultiplier;
     if (enemyDamage >= nextEnemy.getHp() * MAX_UNIT_HP) continue;
 
+    // Both predictions below run in the script's fast-inaccurate mode, as
+    // CoreAI::calcVirtuelUnitDamage does by default: no terrain or luck, and
+    // this unit's counter-attack always netted in. Without it a weak attacker
+    // reads as a threat and the AI will not step into its reach.
     let damageData: BattleResult = { x: 0, y: 0, width: -1, height: 0 };
     if (distance >= minFireRange && distance <= maxFireRange) {
       // An indirect can already reach us from where it stands.
@@ -175,7 +179,7 @@ export function calculateCounterDamage(
       } else {
         damageData = ai.predictor.calcVirtualUnitDamage(
           nextEnemy, enemyDamage, enemyPos, unit, 0, newPosition,
-          GameEnums.LuckDamageMode_Average, GameEnums.LuckDamageMode_Average, ignoreOutOfVisionRange);
+          GameEnums.LuckDamageMode_Average, GameEnums.LuckDamageMode_Average, ignoreOutOfVisionRange, true);
         if (damageData.x >= 0) {
           unitDamageData.set(nextEnemy.getUnitID(), Math.trunc(damageData.x * MAX_UNIT_HP / nextEnemy.getHp()));
         }
@@ -203,7 +207,7 @@ export function calculateCounterDamage(
         } else {
           damageData = ai.predictor.calcVirtualUnitDamage(
             nextEnemy, enemyDamage, target, unit, 0, newPosition,
-            GameEnums.LuckDamageMode_Average, GameEnums.LuckDamageMode_Average, ignoreOutOfVisionRange);
+            GameEnums.LuckDamageMode_Average, GameEnums.LuckDamageMode_Average, ignoreOutOfVisionRange, true);
           if (damageData.x >= 0) {
             unitDamageData.set(nextEnemy.getUnitID(), Math.trunc(damageData.x * MAX_UNIT_HP / nextEnemy.getHp()));
           }
