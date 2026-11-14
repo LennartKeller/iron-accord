@@ -6,6 +6,7 @@ import { SceneRenderer } from '../src/render/renderer.ts';
 import { PointerControls } from '../src/input/pointer.ts';
 import { unitVisibleToViewer } from '../src/render/visibility.ts';
 import { terrainAt, type Scene } from '../src/maps/scene.ts';
+import { drawOverview, overviewCell } from '../src/ui/minimap.ts';
 import { actionableTiles } from '../src/game/pathfinding.ts';
 import { assetFileName } from '../src/cw/assetname.ts';
 import { bootstrapBrowser } from '../src/game/bootstrap.browser.ts';
@@ -21,7 +22,7 @@ import {
 import { ValueNetAgent } from '../src/ai/valuenet.web.ts';
 import { CoordinatedAi } from '../src/ai/coordinated.ts';
 import { defaultConfig, sanitizeConfig, LIMITS, type GameConfig, type SeatController } from '../src/game/config.ts';
-import { GameEnums, type AnimationRunner, type Mulberry32, type Unit } from '../src/host/index.ts';
+import { GameEnums, Unit, type AnimationRunner, type Mulberry32, type Player } from '../src/host/index.ts';
 import type { ScriptRegistry } from '../src/scripts/types.ts';
 
 interface IndexEntry {
@@ -185,10 +186,88 @@ function requestRender(): void {
     positionBattle();
     const wasAnimating = renderer.isAnimating;
     renderer.render();
+    drawMinimap();
     if (renderer.isAnimating) requestRender();
     else if (wasAnimating) syncTurn();
   });
 }
+
+// --- overview ---------------------------------------------------------------
+
+const minimapEl = $<HTMLCanvasElement>('#minimap');
+let minimapBase: { scene: Scene; cell: number; image: HTMLCanvasElement } | null = null;
+
+/**
+ * A small overview in the corner, shown only when the board does not fit the
+ * screen. It marks who holds what, the units the viewer can see, and the part
+ * of the map on screen; tapping or dragging on it moves the camera there.
+ */
+function drawMinimap(): void {
+  const camera = renderer.camera;
+  const band = canvas.clientHeight - camera.insets.top - camera.insets.bottom;
+  const fits = !scene || (renderer.worldWidth * camera.scale <= canvas.clientWidth + 1
+    && renderer.worldHeight * camera.scale <= band + 1);
+  minimapEl.hidden = fits;
+  if (fits || !scene) return;
+
+  if (minimapBase?.scene !== scene) {
+    const cell = Math.max(2, Math.floor(overviewCell(scene, 132, 100)));
+    const image = document.createElement('canvas');
+    image.width = scene.width * cell;
+    image.height = scene.height * cell;
+    // Terrain only: buildings and units change, and are drawn fresh below.
+    drawOverview(image.getContext('2d')!, scene, cell, { buildings: [], units: [] });
+    minimapBase = { scene, cell, image };
+    minimapEl.width = image.width;
+    minimapEl.height = image.height;
+  }
+  const { cell, image } = minimapBase;
+  const ctx = minimapEl.getContext('2d')!;
+  ctx.drawImage(image, 0, 0);
+  // The renderer's live lists are already filtered to what the viewer may see.
+  const buildings = game ? [] as Array<{ x: number; y: number; owner: number }> : scene.buildings;
+  if (game) {
+    for (let y = 0; y < game.map.height; y++) {
+      for (let x = 0; x < game.map.width; x++) {
+        const building = game.map.getTerrain(x, y).getBuilding();
+        if (building) buildings.push({ x, y, owner: building.getOwner()?.getPlayerID() ?? -1 });
+      }
+    }
+  }
+  const scratch = document.createElement('canvas');
+  scratch.width = image.width; scratch.height = image.height;
+  const marks = scratch.getContext('2d')!;
+  drawOverview(marks, { ...scene, terrain: [], height: 0 }, cell, {
+    buildings, units: (renderer.liveUnits ?? scene.units).map(unit => ({ x: unit.x, y: unit.y, owner: unit.owner })),
+  });
+  ctx.drawImage(scratch, 0, 0);
+
+  // The part of the board between the bars.
+  const topLeft = camera.screenToWorld(0, camera.insets.top);
+  const bottomRight = camera.screenToWorld(canvas.clientWidth, canvas.clientHeight - camera.insets.bottom);
+  const k = cell / 16;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(
+    Math.max(0.75, topLeft.x * k), Math.max(0.75, topLeft.y * k),
+    Math.min(image.width - 1.5, (bottomRight.x - topLeft.x) * k),
+    Math.min(image.height - 1.5, (bottomRight.y - topLeft.y) * k));
+}
+
+function minimapJump(event: PointerEvent): void {
+  if (!minimapBase) return;
+  const rect = minimapEl.getBoundingClientRect();
+  const k = 16 / minimapBase.cell * (minimapEl.width / rect.width);
+  renderer.camera.x = (event.clientX - rect.left) * k;
+  renderer.camera.y = (event.clientY - rect.top) * k;
+  requestRender();
+}
+minimapEl.addEventListener('pointerdown', event => {
+  minimapEl.setPointerCapture(event.pointerId);
+  minimapJump(event);
+  event.preventDefault();
+});
+minimapEl.addEventListener('pointermove', event => { if (event.buttons || event.pointerType === 'touch') minimapJump(event); });
 
 // --- presentation ---------------------------------------------------------
 
@@ -351,6 +430,75 @@ function badgesFor(unit: Unit): { hp?: number; icons: string[] } {
   return { hp: hp < 10 ? hp : undefined, icons };
 }
 
+/** The colour a seat is drawn in on the board, which is the map's, not a fixed palette. */
+const seatColor = (index: number) => scene?.players[index]?.color ?? playerColor(index);
+
+/**
+ * Day, and every player's funds — whose turn it is at a glance, and whether
+ * the opponent can afford that tank. The active seat also shows what it earns
+ * per day; funds are public in Advance Wars, fog or not.
+ */
+function renderHud(): void {
+  if (!game) return;
+  const day = document.createElement('span');
+  day.className = 'hud-day';
+  day.textContent = `Day ${game.day}`;
+  const seats = game.map.players.map((player, index) => {
+    const seat = document.createElement('span');
+    const active = index === game!.currentPlayerIndex;
+    seat.className = `hud-seat${active ? ' hud-seat--active' : ''}${player.isDefeated ? ' hud-seat--out' : ''}`;
+    seat.style.setProperty('--seat', seatColor(index));
+    const dot = document.createElement('i');
+    const name = document.createElement('b');
+    name.textContent = `P${index + 1}`;
+    const money = document.createElement('span');
+    money.textContent = funds(player.funds);
+    seat.append(dot, name, money);
+    if (active && !player.isDefeated) {
+      const income = document.createElement('small');
+      income.textContent = `+${Math.round(game!.calcIncome(player)).toLocaleString('en-US')}`;
+      income.title = 'Income per day';
+      seat.append(income);
+    }
+    seat.title = `P${index + 1}: ${player.units.length} units`;
+    return seat;
+  });
+  turnEl.replaceChildren(day, ...seats);
+}
+
+const turnToast = $('#turnToast');
+let announcedTurn = '';
+
+/**
+ * Says whose turn it is when it changes. Without it a hand-over is a number
+ * changing in the corner, and after an AI turn it is easy not to notice that
+ * the board is yours again.
+ */
+function announceTurn(): void {
+  if (!game || game.over) { turnToast.hidden = true; return; }
+  const key = `${sceneLoadVersion}:${game.day}:${game.currentPlayerIndex}`;
+  if (key === announcedTurn) return;
+  const first = announcedTurn === '' || !announcedTurn.startsWith(`${sceneLoadVersion}:`);
+  announcedTurn = key;
+  // A freshly loaded or resumed match needs no fanfare.
+  if (first) return;
+  const index = game.currentPlayerIndex;
+  const who = currentSeatIsAI() ? `P${index + 1} (computer)` : `P${index + 1} — your move`;
+  turnToast.replaceChildren();
+  const day = document.createElement('small');
+  day.textContent = `Day ${game.day}`;
+  const name = document.createElement('strong');
+  name.textContent = who;
+  turnToast.append(day, name);
+  turnToast.style.setProperty('--seat', seatColor(index));
+  turnToast.hidden = false;
+  // Restart the CSS animation for back-to-back hand-overs.
+  turnToast.classList.remove('turn-toast--show');
+  void turnToast.offsetWidth;
+  turnToast.classList.add('turn-toast--show');
+}
+turnToast.addEventListener('animationend', () => { turnToast.hidden = true; });
+
 function syncTurn(): void {
   if (!game) {
     turnEl.textContent = '';
@@ -359,8 +507,8 @@ function syncTurn(): void {
     observerButton.hidden = true;
     return;
   }
-  turnEl.textContent = `Day ${game.day} · P${game.currentPlayerIndex + 1} · ${game.currentPlayer.funds}G`;
-  turnEl.style.color = playerColor(game.currentPlayerIndex);
+  renderHud();
+  announceTurn();
   endTurnButton.hidden = false;
   const pending = game.pendingUnits().length;
   endTurnButton.textContent = 'End turn';
@@ -417,41 +565,57 @@ function cycleToNextUnit(): void {
   requestRender();
 }
 
+/** Where the selected unit can go: a light wash with a crisp border, so the terrain stays readable. */
+const RANGE_EDGE = '#f0f6fc';
+
 function showRange(): void {
   if (!game?.range) { renderer.highlights = []; return; }
-  const color = playerColor(game.currentPlayerIndex);
   renderer.highlights = actionableTiles(game.range).map(tile => ({
-    x: tile.x, y: tile.y, color: tile.canStop ? color : '#ffffff',
+    x: tile.x, y: tile.y, color: '#ffffff', edge: RANGE_EDGE,
+    // A tile the unit can act on but not stop at (an ally stands there) is fainter.
+    alpha: tile.canStop ? 0.24 : 0.1,
   }));
 }
 
 function showTargets(targets: Array<{ x: number; y: number; kind?: string }>): void {
   // Structures are tinted differently from units so it is clear what is being
   // shot at — a pipe seam looks nothing like a target otherwise.
-  renderer.highlights = targets.map(t => ({
-    x: t.x, y: t.y, color: t.kind && t.kind !== 'unit' ? '#d29922' : '#f85149',
-  }));
+  renderer.highlights = targets.map(t => {
+    const color = t.kind && t.kind !== 'unit' ? '#d29922' : '#f85149';
+    return { x: t.x, y: t.y, color, alpha: 0.4, edge: color };
+  });
 }
+
+/**
+ * What Commander Wars itself calls a unit, building or terrain. The scripts
+ * carry proper names ("APC", "Anti-Tank Cannon"); title-casing the id gives
+ * "Apc" and "Antitankcannon".
+ */
+function displayName(id: string): string {
+  let name: unknown;
+  try { name = registry?.[id]?.getName?.(); } catch { /* fall through */ }
+  if (typeof name === 'string' && name.trim() !== '') return name;
+  return id.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/** Thousands separators, so 16000 does not have to be counted. */
+const funds = (value: number) => `${Math.round(value).toLocaleString('en-US')} G`;
 
 function describe(tile: { x: number; y: number } | null): void {
   tacticalPanel.hide();
   if (!scene || !tile) { statusEl.textContent = '—'; return; }
   const viewer = fogViewer();
   if (fogEnabled() && viewer?.getFieldVisibleType(tile.x, tile.y) === GameEnums.VisionType_Shrouded) {
-    statusEl.textContent = `(${tile.x},${tile.y}) · Unexplored`;
+    statusEl.textContent = 'Unexplored';
     return;
   }
-  const parts = [`(${tile.x},${tile.y})`, terrainAt(scene, tile.x, tile.y)];
-  const building = game?.map.getTerrain(tile.x, tile.y).getBuilding();
-  if (building) {
-    const owner = building.getOwner();
-    parts.push(`${building.getBuildingID()}${owner ? ` P${owner.getPlayerID() + 1}` : ' neutral'}`);
-  }
+  // Most specific first: the unit, then what it stands on.
+  const parts: string[] = [];
   const unit = game?.unitAt(tile.x, tile.y);
   if (unit && unitVisibleToViewer(unit, viewer)) {
     tacticalPanel.showUnit(game!, unit, tile);
-    parts.push(`${unit.getUnitID()} P${unit.getOwner().getPlayerID() + 1}`);
-    parts.push(`${Math.ceil(unit.getHp())}HP ${unit.fuel}F`);
+    parts.push(`${displayName(unit.getUnitID())} (P${unit.getOwner().getPlayerID() + 1})`);
+    parts.push(`${Math.ceil(unit.getHp())} HP`);
     if (unit.getLoadedUnitCount() > 0) {
       parts.push(`carrying ${unit.getLoadedUnitCount()}/${unit.getLoadingPlace()}`);
     }
@@ -463,12 +627,83 @@ function describe(tile: { x: number; y: number } | null): void {
       parts.push(unit.canMoveAndFire() ? 'reach shown' : 'firing range shown');
     }
   }
+  const building = game?.map.getTerrain(tile.x, tile.y).getBuilding();
+  if (building) {
+    const owner = building.getOwner();
+    parts.push(`${displayName(building.getBuildingID())} — ${owner ? `P${owner.getPlayerID() + 1}` : 'neutral'}`);
+  } else {
+    parts.push(displayName(terrainAt(scene, tile.x, tile.y)));
+  }
   statusEl.textContent = parts.join(' · ');
+  statusEl.title = `Tile ${tile.x}, ${tile.y}`;
 }
 
 // --- context menu ---------------------------------------------------------
 
-interface MenuItem { label: string; detail?: string; disabled?: boolean; run?(): void; }
+interface MenuItem { label: string; detail?: string; disabled?: boolean; icon?: HTMLElement; run?(): void; }
+
+/** Sprite layers a unit type would be drawn with for a player, without building one. */
+const rosterSprites = new Map<string, Unit['sprites']>();
+function spritesForUnitType(unitID: string, player: Player): Unit['sprites'] {
+  if (!game) return [];
+  const key = `${unitID}:${player.getPlayerID()}:${player.getArmy()}`;
+  let layers = rosterSprites.get(key);
+  if (!layers) {
+    // A throwaway unit that never joins the board; the identity counter it
+    // would otherwise consume is rules state, so it is put back.
+    const counter = game.map.getUnitUidCounter();
+    const probe = new Unit(game.map, unitID, player, -1, -1);
+    try { registry?.[unitID]?.loadSprites?.(probe, game.map); } catch { /* no artwork */ }
+    game.map.setUnitUidCounter(counter);
+    game.map.markUnitsDirty();
+    layers = probe.sprites;
+    rosterSprites.set(key, layers);
+  }
+  return layers;
+}
+
+/** One of Commander Wars' own interface icons, by sprite id; blank if the artwork is not shipped. */
+function spriteIcon(id: string): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.className = 'menu-icon menu-icon--action';
+  canvas.width = 24;
+  canvas.height = 24;
+  canvas.setAttribute('aria-hidden', 'true');
+  void sprites.get(id).then(sprite => {
+    const ctx = canvas.getContext('2d');
+    if (!ctx || !sprite) return;
+    ctx.imageSmoothingEnabled = false;
+    const scale = Math.min(24 / sprite.frameWidth, 24 / sprite.frameHeight);
+    const w = sprite.frameWidth * scale, h = sprite.frameHeight * scale;
+    ctx.drawImage(sprite.image, 0, 0, sprite.frameWidth, sprite.frameHeight, (24 - w) / 2, (24 - h) / 2, w, h);
+  }).catch(() => { /* no artwork: the label stands alone */ });
+  return canvas;
+}
+
+/** A small recoloured picture of a unit type, for menus. */
+function unitIcon(unitID: string, player: Player): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.className = 'menu-icon';
+  canvas.width = 32;
+  canvas.height = 32;
+  canvas.setAttribute('aria-hidden', 'true');
+  const table = scene?.players[player.getPlayerID()]?.colorTable;
+  void Promise.all(spritesForUnitType(unitID, player).map(layer =>
+    (table && layer.id.endsWith('+mask') ? sprites.getRecolored(layer.id, table) : sprites.get(layer.id))
+      .catch(() => null),
+  )).then(layers => {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    for (const sprite of layers) {
+      if (!sprite) continue;
+      const scale = Math.min(30 / sprite.frameWidth, 30 / sprite.frameHeight);
+      const w = sprite.frameWidth * scale, h = sprite.frameHeight * scale;
+      ctx.drawImage(sprite.image, 0, 0, sprite.frameWidth, sprite.frameHeight, (32 - w) / 2, 31 - h, w, h);
+    }
+  });
+  return canvas;
+}
 
 function openMenu(screen: { x: number; y: number }, items: MenuItem[]): void {
   if (items.length === 0) { closeMenu(); return; }
@@ -480,7 +715,11 @@ function openMenu(screen: { x: number; y: number }, items: MenuItem[]): void {
     }
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = item.label;
+    if (item.icon) button.append(item.icon);
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = item.label;
+    button.append(label);
     if (item.detail) {
       const cost = document.createElement('span');
       cost.className = 'cost';
@@ -584,6 +823,7 @@ function openActionMenu(screen: { x: number; y: number }): void {
   if (!game || !actor || !destination) return;
   const items: MenuItem[] = game.availableActions(actor, destination).map(option => ({
     label: option.label,
+    icon: option.icon ? spriteIcon(option.icon) : undefined,
     run: () => runAction(option.id),
   }));
 
@@ -593,7 +833,8 @@ function openActionMenu(screen: { x: number; y: number }): void {
   if (cargo.length > 0 && !actor.hasMoved) {
     for (const { index, unit } of cargo) {
       items.push({
-        label: `Unload ${unit.getUnitID().replace(/_/g, ' ').toLowerCase()}`,
+        label: `Unload ${displayName(unit.getUnitID())}`,
+        icon: unitIcon(unit.getUnitID(), unit.getOwner()),
         run: () => beginUnload(index),
       });
     }
@@ -712,6 +953,32 @@ const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms
  * follow what happened. Yielding to the event loop also keeps the page
  * responsive on large maps.
  */
+/**
+ * Brings what the computer is about to do into view. Only for things the
+ * person watching may see: scrolling to a hidden unit would give away where it
+ * is as surely as drawing it.
+ */
+function followAction(action: Parameters<typeof applyAction>[1]): void {
+  if (!game || action.kind === 'endTurn') return;
+  const viewer = fogViewer();
+  let focus: { x: number; y: number };
+  if (action.kind === 'unit') {
+    const unit = game.map.getUnitByUid(action.uid);
+    if (!unit || !unitVisibleToViewer(unit, viewer)) return;
+    focus = action.target ?? action.to;
+  } else {
+    focus = action.at;
+    if (fogEnabled() && viewer && !viewer.getFieldVisible(focus.x, focus.y)) return;
+  }
+  const camera = renderer.camera;
+  const wx = focus.x * 16 + 8, wy = focus.y * 16 + 8;
+  if (camera.shows(wx, wy, 48)) return;
+  camera.x = wx;
+  camera.y = wy;
+  camera.clampTo(renderer.worldWidth, renderer.worldHeight);
+  requestRender();
+}
+
 async function maybeRunAI(): Promise<void> {
   if (!game || !env || aiRunning || sceneLoading || game.over) return;
   if (!currentSeatIsAI()) return;
@@ -750,6 +1017,8 @@ async function maybeRunAI(): Promise<void> {
         requestRender();
         break;
       }
+
+      followAction(chosen);
 
       // If the chosen action is no longer legal, selecting again would return
       // the same one forever and hold the board hostage for guard x 160ms.
@@ -795,9 +1064,11 @@ function openBuildMenu(screen: { x: number; y: number }, tile: { x: number; y: n
   if (!game) return;
   const building = game.map.getTerrain(tile.x, tile.y).getBuilding();
   if (!building) return;
+  const owner = building.getOwner() ?? game.currentPlayer;
   const items: MenuItem[] = game.buildOptions(building).map(option => ({
-    label: option.id.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()),
-    detail: `${option.cost}G`,
+    label: displayName(option.id),
+    detail: funds(option.cost),
+    icon: unitIcon(option.id, owner),
     disabled: !option.affordable,
     run: () => {
       const built = game!.buildUnit(tile.x, tile.y, option.id);
@@ -1160,20 +1431,61 @@ function matchesFilters(entry: IndexEntry): boolean {
   return true;
 }
 
+/** "2_player" -> "2 players", "advance_wars_1_campaign.camp" -> "Advance Wars 1 campaign". */
+function categoryLabel(category: string): string {
+  const players = /^(\d+)_player$/.exec(category);
+  if (players) return `${players[1]} players`;
+  const words = category.replace(/\.camp$/, '').replace(/_/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** Thumbnails are drawn when a row scrolls into view; 570 scenes are not fetched up front. */
+const previewScenes = new Map<string, Promise<Scene>>();
+const previewObserver = new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    previewObserver.unobserve(entry.target);
+    const preview = entry.target as HTMLCanvasElement;
+    const id = preview.dataset.map!;
+    let pending = previewScenes.get(id);
+    if (!pending) {
+      pending = fetch(asset(`scenes/${id}.json`)).then(response => response.json() as Promise<Scene>);
+      previewScenes.set(id, pending);
+    }
+    void pending.then(mapScene => {
+      const cell = overviewCell(mapScene, preview.width, preview.height);
+      const ctx = preview.getContext('2d')!;
+      ctx.translate((preview.width - mapScene.width * cell) / 2, (preview.height - mapScene.height * cell) / 2);
+      drawOverview(ctx, mapScene, cell);
+      preview.classList.add('map-preview--ready');
+    }).catch(() => { /* a missing preview is not worth a message */ });
+  }
+}, { root: $('#list'), rootMargin: '200px' });
+
 function renderList(): void {
   const listEl = $<HTMLUListElement>('#list');
   const matches = index.filter(matchesFilters);
   $('#filterCount').textContent = `${matches.length} map${matches.length === 1 ? '' : 's'}`;
+  previewObserver.disconnect();
 
   listEl.replaceChildren(...matches.slice(0, 300).map(entry => {
     const li = document.createElement('li');
     const button = document.createElement('button');
     button.type = 'button';
-    const detail = `${entry.width}×${entry.height} · ${entry.playerCount}P · ${escapeHtml(entry.category)}`
-      + (entry.author ? ` · ${escapeHtml(entry.author)}` : '');
-    button.innerHTML = `${escapeHtml(entry.name)}<small>${detail}</small>`;
+    const preview = document.createElement('canvas');
+    preview.className = 'map-preview';
+    preview.width = 144;
+    preview.height = 108;
+    preview.dataset.map = entry.id;
+    preview.setAttribute('aria-hidden', 'true');
+    const text = document.createElement('span');
+    const detail = `${entry.width}×${entry.height} · ${categoryLabel(entry.category)}`
+      + (entry.author ? ` · by ${entry.author}` : '');
+    text.innerHTML = `${escapeHtml(entry.name)}<small>${escapeHtml(detail)}</small>`;
+    button.append(preview, text);
     button.addEventListener('click', () => { picker.close(); void openSetup(entry); });
     li.append(button);
+    previewObserver.observe(preview);
     return li;
   }));
 }
@@ -1364,12 +1676,15 @@ function renderSeats(draft: GameConfig, scene: Scene): void {
     // for a human seat, so it appears only when one is needed.
     const controlCell = document.createElement('td');
     const opponent = select(Object.keys(AGENTS), seat.agent ?? 'heuristic',
-      value => { seat.agent = value; }, { commanderwars: 'Commander Wars', coordinated: 'Coordinated (experimental)' });
+      value => { seat.agent = value; }, {
+        heuristic: 'Greedy (fast)', commanderwars: 'Commander Wars', coordinated: 'Coordinated (experimental)',
+        planner: 'Planner', valuenet: 'Planner + value net',
+      });
     opponent.hidden = seat.controller !== 'ai';
     controlCell.append(select(['human', 'ai'], seat.controller, value => {
       seat.controller = value as SeatController;
       opponent.hidden = seat.controller !== 'ai';
-    }), opponent);
+    }, { human: 'Human', ai: 'Computer' }), opponent);
 
     row.append(seatCell, armyCell, teamCell, controlCell);
     return row;
@@ -1456,12 +1771,30 @@ $<HTMLInputElement>('#optDim').addEventListener('change', e => {
   syncUnits();
   requestRender();
 });
-window.addEventListener('resize', () => { renderer.resize(); requestRender(); });
+/** The bars lie over the canvas; tell the camera how much of it they cover. */
+function applyInsets(): void {
+  renderer.camera.insets = {
+    top: $('.bar--top').getBoundingClientRect().bottom,
+    bottom: Math.max(0, window.innerHeight - $('.bar--bottom').getBoundingClientRect().top),
+  };
+}
+applyInsets();
+window.addEventListener('resize', () => { applyInsets(); renderer.resize(); requestRender(); });
 new ResizeObserver(() => {
   document.documentElement.style.setProperty('--tactical-bottom',
     `${window.innerHeight - $('.bar--bottom').getBoundingClientRect().top + 12}px`);
+  applyInsets();
   positionBattle();
+  requestRender();
 }).observe($('.bar--bottom'));
+
+// Idle animation: a few steps a second is all the sprite sheets have, and a
+// hidden tab or a reduced-motion preference gets none.
+setInterval(() => {
+  if (document.hidden || reducedMotion.matches || !scene) return;
+  renderer.animationTick++;
+  requestRender();
+}, 280);
 
 async function main(): Promise<void> {
   const initial = new URL(location.href).searchParams;
@@ -1475,7 +1808,7 @@ async function main(): Promise<void> {
   $<HTMLSelectElement>('#filterCategory').append(...categories.map(category => {
     const option = document.createElement('option');
     option.value = category;
-    option.textContent = category;
+    option.textContent = categoryLabel(category);
     return option;
   }));
   renderList();

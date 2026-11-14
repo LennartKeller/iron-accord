@@ -45,9 +45,13 @@ async function startGame(page: Page) {
 async function tapTile(page: Page, x: number, y: number) {
   const point = await page.locator('#stage').evaluate((canvas, tile) => {
     const rect = canvas.getBoundingClientRect();
-    const scale = Math.max(2.5, Math.min((rect.width - 24) / 144, (rect.height - 24) / 112, 12));
+    // The board is fitted to the band between the two bars, not the whole canvas.
+    const top = document.querySelector('.bar--top')!.getBoundingClientRect().bottom;
+    const bottom = window.innerHeight - document.querySelector('.bar--bottom')!.getBoundingClientRect().top;
+    const band = rect.height - top - bottom;
+    const scale = Math.max(2.5, Math.min((rect.width - 24) / 144, (band - 24) / 112, 12));
     return { x: rect.left + rect.width / 2 + ((tile.x + 0.5) * 16 - 72) * scale,
-      y: rect.top + rect.height / 2 + ((tile.y + 0.5) * 16 - 56) * scale };
+      y: rect.top + top + band / 2 + ((tile.y + 0.5) * 16 - 56) * scale };
   }, { x, y });
   if (test.info().project.name === 'mobile') await page.touchscreen.tap(point.x, point.y);
   else await page.mouse.click(point.x, point.y);

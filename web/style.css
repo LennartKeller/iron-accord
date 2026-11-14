@@ -104,7 +104,31 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .picker__list button:hover, .picker__list button:focus-visible { background: rgba(255,255,255,0.06); }
 .picker__list small { color: var(--muted); display: block; margin-top: 2px; }
 
-.turn { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.turn {
+  display: flex; align-items: center; gap: 6px;
+  font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 13px;
+}
+.hud-day { font-weight: 600; color: var(--muted); margin-right: 2px; }
+.hud-seat {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border-radius: 999px;
+  border: 1px solid transparent; color: var(--muted);
+}
+.hud-seat i { width: 9px; height: 9px; border-radius: 50%; background: var(--seat); flex: none; }
+.hud-seat b { font-weight: 600; }
+.hud-seat small { color: #7ee787; font-size: 11px; }
+/* The seat to move is the one the eye should land on. */
+.hud-seat--active {
+  color: var(--text);
+  border-color: var(--seat);
+  background: color-mix(in srgb, var(--seat) 16%, transparent);
+}
+.hud-seat--out { text-decoration: line-through; opacity: 0.5; }
+/* On a phone there is room for the seat to move and nothing else. */
+@media (max-width: 640px) {
+  .hud-seat:not(.hud-seat--active) span, .hud-seat:not(.hud-seat--active) b { display: none; }
+  .hud-seat:not(.hud-seat--active) { padding: 4px; }
+}
 
 .chip--primary { background: rgba(88, 166, 255, 0.22); border-color: #58a6ff; }
 .chip--primary:active { background: rgba(88, 166, 255, 0.35); }
@@ -154,7 +178,10 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 }
 .menu button:hover, .menu button:focus-visible { background: rgba(255, 255, 255, 0.09); }
 .menu button[disabled] { opacity: 0.4; cursor: default; }
-.menu .cost { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.menu .cost { margin-left: auto; padding-left: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.menu button { display: flex; align-items: center; gap: 10px; }
+.menu .label { white-space: nowrap; }
+.menu-icon { width: 32px; height: 32px; flex: none; image-rendering: pixelated; }
 .menu .sep { height: 1px; background: var(--line); margin: 4px 2px; }
 
 /* --- banner -------------------------------------------------------------- */
@@ -230,3 +257,46 @@ select, .setup input {
 .rule__items { display: flex; flex-wrap: wrap; gap: 10px; padding-left: 22px; }
 .rule__items label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .rule__items input[type="number"] { width: 90px; }
+
+/* --- overview -------------------------------------------------------------- */
+.minimap {
+  position: fixed; z-index: 6; right: 12px; top: calc(env(safe-area-inset-top) + 66px);
+  max-width: 132px; max-height: 100px;
+  border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  image-rendering: pixelated; cursor: pointer; touch-action: none;
+  opacity: 0.92;
+}
+
+/* --- turn hand-over ---------------------------------------------------------- */
+.turn-toast {
+  position: fixed; z-index: 25; left: 50%; top: 28%;
+  transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 12px 28px; border-radius: 14px;
+  background: var(--panel); border: 1px solid var(--seat, var(--line));
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4), 0 14px 36px rgba(0, 0, 0, 0.5);
+  pointer-events: none; text-align: center;
+}
+.turn-toast small { color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; font-size: 11px; }
+.turn-toast strong { font-size: 18px; color: var(--seat, var(--text)); }
+.turn-toast--show { animation: turn-toast 1.5s ease-out both; }
+@keyframes turn-toast {
+  0% { opacity: 0; transform: translate(-50%, -40%); }
+  12%, 72% { opacity: 1; transform: translate(-50%, -50%); }
+  100% { opacity: 0; transform: translate(-50%, -58%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .turn-toast--show { animation-name: turn-toast-still; }
+  @keyframes turn-toast-still { 0%, 85% { opacity: 1; } 100% { opacity: 0; } }
+}
+
+/* --- map browser thumbnails ---------------------------------------------------- */
+.picker__list button { display: flex; align-items: center; gap: 12px; }
+.map-preview {
+  width: 72px; height: 54px; flex: none; border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05); image-rendering: pixelated;
+  opacity: 0; transition: opacity 0.2s;
+}
+.map-preview--ready { opacity: 1; }
+.menu-icon--action { width: 24px; height: 24px; }

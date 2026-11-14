@@ -14,6 +14,13 @@ export class Camera {
   // assignment it implies, so the field would silently stay undefined.
   private viewport: Viewport;
 
+  /**
+   * Strips of the viewport that something else covers — the top and bottom
+   * bars sit over the canvas. Fitting and clamping work inside what is left,
+   * so a map that "fits" is not half hidden behind the interface.
+   */
+  insets = { top: 0, bottom: 0 };
+
   constructor(viewport: Viewport) {
     this.viewport = viewport;
   }
@@ -57,16 +64,21 @@ export class Camera {
    * does — leaves most of the screen showing empty space beyond the edge.
    */
   clampTo(worldWidth: number, worldHeight: number): void {
+    const { top, bottom } = this.insets;
     const visibleWidth = this.viewport.width / this.scale;
-    const visibleHeight = this.viewport.height / this.scale;
+    const visibleHeight = (this.viewport.height - top - bottom) / this.scale;
 
     this.x = worldWidth <= visibleWidth
       ? worldWidth / 2
       : clamp(this.x, visibleWidth / 2, worldWidth - visibleWidth / 2);
 
+    // Vertically the free band is not centred on the viewport when the two
+    // insets differ, so the limits are measured from each bar.
     this.y = worldHeight <= visibleHeight
-      ? worldHeight / 2
-      : clamp(this.y, visibleHeight / 2, worldHeight - visibleHeight / 2);
+      ? worldHeight / 2 - (top - bottom) / (2 * this.scale)
+      : clamp(this.y,
+        (this.viewport.height / 2 - top) / this.scale,
+        worldHeight - (this.viewport.height / 2 - bottom) / this.scale);
   }
 
   /**
@@ -83,7 +95,7 @@ export class Camera {
   /** Scale at which the whole map fits, with padding. */
   fitScale(worldWidth: number, worldHeight: number, padding = 24): number {
     const sx = (this.viewport.width - padding) / worldWidth;
-    const sy = (this.viewport.height - padding) / worldHeight;
+    const sy = (this.viewport.height - this.insets.top - this.insets.bottom - padding) / worldHeight;
     return clamp(Math.min(sx, sy), this.minScale, this.maxScale);
   }
 
@@ -92,7 +104,14 @@ export class Camera {
     const fitted = this.fitScale(worldWidth, worldHeight, padding);
     this.scale = clamp(Math.max(fitted, this.minFitScale), this.minScale, this.maxScale);
     this.x = worldWidth / 2;
-    this.y = worldHeight / 2;
+    this.y = worldHeight / 2 - (this.insets.top - this.insets.bottom) / (2 * this.scale);
+  }
+
+  /** True when a world point is on screen with `margin` screen pixels to spare. */
+  shows(wx: number, wy: number, margin = 0): boolean {
+    const { x, y } = this.worldToScreen(wx, wy);
+    return x >= margin && x <= this.viewport.width - margin
+      && y >= this.insets.top + margin && y <= this.viewport.height - this.insets.bottom - margin;
   }
 }
 

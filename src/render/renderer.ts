@@ -25,6 +25,12 @@ export interface Highlight {
   color: string;
   /** Overrides the default opacity, for overlays that cover a lot of board. */
   alpha?: number;
+  /**
+   * CSS colour for a crisp line along the outer edge of the highlighted area.
+   * Tiles sharing an edge colour form one region; only its boundary is drawn,
+   * which is what lets the fill stay faint enough to see the terrain through.
+   */
+  edge?: string;
 }
 
 export interface LiveUnit {
@@ -37,6 +43,18 @@ export interface LiveUnit {
 export class SceneRenderer {
   private readonly ctx: CanvasRenderingContext2D;
   private terrainLayer: HTMLCanvasElement | null = null;
+  /** The terrain again, one canvas per animation step, baked after the first paint. */
+  private terrainFrames: HTMLCanvasElement[] = [];
+  /**
+   * Advances the idle animation: a sprite sheet with several columns shows
+   * column `animationTick % cols`. The app bumps it a few times a second;
+   * left at zero everything shows its first frame, as it always did.
+   */
+  animationTick = 0;
+
+  private frameOf(sprite: LoadedSprite): number {
+    return this.reducedMotion || sprite.cols <= 1 ? 0 : this.animationTick % sprite.cols;
+  }
   private dpr = 1;
   private loadVersion = 0;
 
@@ -108,6 +126,8 @@ export class SceneRenderer {
     this.scene = scene;
     this.clearAnimations();
     this.terrainLayer = null;
+    this.terrainFrames = [];
+    this.terrainSteps = 1;
     this.selected = null;
     this.highlights = [];
     this.path = [];
@@ -120,6 +140,7 @@ export class SceneRenderer {
     const layer = await this.bakeTerrain(scene);
     if (version !== this.loadVersion) return;
     this.terrainLayer = layer;
+    void this.bakeTerrainFrames(scene, version);
     this.resize();
     this.camera.fit(this.worldWidth, this.worldHeight);
   }
@@ -173,7 +194,33 @@ export class SceneRenderer {
     }
   }
 
-  private async bakeTerrain(scene: Scene): Promise<HTMLCanvasElement> {
+  /**
+   * Bakes the remaining animation steps of the terrain in the background. The
+   * sea is most of what moves on a map, and it is terrain; redrawing every tile
+   * each tick would be wasteful, a handful of pre-drawn canvases is not.
+   */
+  private async bakeTerrainFrames(scene: Scene, version: number): Promise<void> {
+    // How many steps the terrain's own sprites have, learned while baking the
+    // first frame. One means nothing on this map's terrain moves.
+    const steps = this.terrainSteps;
+    if (steps <= 1) return;
+    try {
+      const frames: HTMLCanvasElement[] = [];
+      for (let frame = 0; frame < steps; frame++) {
+        const layer = await this.bakeTerrain(scene, frame);
+        if (version !== this.loadVersion) return;
+        frames.push(layer);
+      }
+      this.terrainFrames = frames;
+    } catch {
+      // Animation is decoration: a failed bake leaves the still terrain in place.
+    }
+  }
+
+  /** The most columns any terrain sprite on the current scene has. */
+  private terrainSteps = 1;
+
+  private async bakeTerrain(scene: Scene, frame = 0): Promise<HTMLCanvasElement> {
     const layer = document.createElement('canvas');
     layer.width = scene.width * TILE_SIZE;
     layer.height = scene.height * TILE_SIZE;
@@ -186,7 +233,9 @@ export class SceneRenderer {
       for (let x = 0; x < scene.width; x++) {
         for (const ref of tileSpritesAt(scene, x, y)) {
           const sprite = await this.resolve(scene, ref);
-          if (sprite) this.drawSprite(ctx, sprite, x, y);
+          if (!sprite) continue;
+          if (frame === 0 && sprite.cols > this.terrainSteps) this.terrainSteps = sprite.cols;
+          this.drawSprite(ctx, sprite, x, y, sprite.cols > 1 ? frame % sprite.cols : 0);
         }
       }
     }
@@ -215,7 +264,9 @@ export class SceneRenderer {
     ctx.translate(origin.x, origin.y);
     ctx.scale(camera.scale, camera.scale);
 
-    ctx.drawImage(this.terrainLayer, 0, 0);
+    const animated = this.reducedMotion ? null
+      : this.terrainFrames[this.animationTick % Math.max(1, this.terrainFrames.length)];
+    ctx.drawImage(animated ?? this.terrainLayer, 0, 0);
     this.drawBuildings(ctx, scene);
     this.drawHighlights(ctx);
     this.drawUnits(ctx, scene);
@@ -243,7 +294,7 @@ export class SceneRenderer {
       for (const building of this.liveBuildings) {
         for (const layer of building.sprites) {
           const sprite = this.peek(layer.id, layer.table);
-          if (sprite) this.drawSprite(ctx, sprite, building.x, building.y);
+          if (sprite) this.drawSprite(ctx, sprite, building.x, building.y, this.frameOf(sprite));
         }
       }
       return;
@@ -307,7 +358,9 @@ export class SceneRenderer {
         ctx.save();
         // A spent unit is dimmed, as the desktop client does with its wait sprite.
         if (unit.hasMoved) ctx.globalAlpha = 0.55;
-        this.drawSprite(ctx, sprite, unit.x, unit.y);
+        // A unit that has finished for the turn stands still, which also makes
+        // "who can still act" readable from across the board.
+        this.drawSprite(ctx, sprite, unit.x, unit.y, unit.hasMoved ? 0 : this.frameOf(sprite));
         ctx.restore();
       }
       if (unit.badges) this.drawBadges(ctx, unit.x, unit.y, unit.badges);
@@ -480,6 +533,38 @@ export class SceneRenderer {
       ctx.globalAlpha = highlight.alpha ?? 0.45;
       ctx.fillStyle = highlight.color;
       ctx.fillRect(highlight.x * TILE_SIZE, highlight.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+    }
+
+    // Region outlines: an edge is drawn only where the neighbouring tile is not
+    // part of the same region.
+    const regions = new Map<string, Set<number>>();
+    for (const highlight of this.highlights) {
+      if (!highlight.edge) continue;
+      let tiles = regions.get(highlight.edge);
+      if (!tiles) regions.set(highlight.edge, tiles = new Set());
+      tiles.add(highlight.y * 4096 + highlight.x);
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'square';
+    // About two screen pixels, never thinner than a tenth of a tile.
+    const width = Math.max(2 / this.camera.scale, TILE_SIZE / 10);
+    for (const [color, tiles] of regions) {
+      const path = new Path2D();
+      for (const key of tiles) {
+        const x = key % 4096, y = Math.floor(key / 4096);
+        const left = x * TILE_SIZE, top = y * TILE_SIZE, right = left + TILE_SIZE, bottom = top + TILE_SIZE;
+        if (!tiles.has(key - 4096)) { path.moveTo(left, top); path.lineTo(right, top); }
+        if (!tiles.has(key + 4096)) { path.moveTo(left, bottom); path.lineTo(right, bottom); }
+        if (!tiles.has(key - 1)) { path.moveTo(left, top); path.lineTo(left, bottom); }
+        if (!tiles.has(key + 1)) { path.moveTo(right, top); path.lineTo(right, bottom); }
+      }
+      // A dark underlay keeps the line readable on sand and snow alike.
+      ctx.strokeStyle = 'rgba(13, 17, 23, 0.55)';
+      ctx.lineWidth = width * 2;
+      ctx.stroke(path);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke(path);
     }
     ctx.restore();
   }

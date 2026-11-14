@@ -264,6 +264,10 @@ fs.writeFileSync(path.join(scenesDir, 'index.json'), JSON.stringify(index));
   const badgeIcons = [
     '1', '2', '3', '4', '5', '6', '7', '8', '9',
     'fuel', 'ammo', 'ammo1', 'capture', 'transport', 'hp+hidden', 'dive',
+    // What each ACTION_*.js answers from getIcon(), for the action menu.
+    'wait', 'icon_fire', 'join', 'load', 'build', 'destroy', 'flareshot', 'heal', 'missile_icon',
+    'ration', 'repair', 'unhide', 'transferUnit', 'TEMPORARY_AIRPORT', 'TEMPORARY_HARBOUR',
+    'WATERMINE', 'WATERPLANE',
   ];
   let added = 0;
   for (const id of badgeIcons) {
