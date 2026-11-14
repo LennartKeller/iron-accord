@@ -107,7 +107,10 @@ describe('Commander Wars map reader', () => {
         if (!tile.unit || tile.unit.fuel >= 0) continue;
         sentinels++;
         const unit = unitAt(live, tile.x, tile.y);
-        expect(unit.getFuel()).toBe(unit.getMaxFuel());
+        // A unit with a tank is created full. One without (a WATERMINE) reads
+        // -1 in Commander Wars itself: Unit::setFuel never assigns when
+        // maxFuel is 0, so the stored -1 is that unit's real fuel.
+        expect(unit.getFuel()).toBe(unit.getMaxFuel() > 0 ? unit.getMaxFuel() : -1);
       }
     }
     expect(sentinels).toBeGreaterThan(0);

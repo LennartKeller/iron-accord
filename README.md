@@ -81,7 +81,14 @@ npm run build
 npm run test:browser   # production desktop + mobile regression tests
 npm run golden:check   # do the recorded games still reproduce? (also part of npm test)
 npm run golden:update  # accept a deliberate rules change and re-record them
+node tools/upstream-diff.ts test/fixtures/upstream/<game>.rec.gz   # compare with the real Commander Wars
 ```
+
+**The engine is checked against the real game.** `test/fixtures/upstream/` holds
+games played by Commander Wars itself; `npm test` replays each player-turn from
+the real game's board and requires the real game's next board. See
+[differential testing](docs/upstream-differential.md) for how to record more and
+what it cannot see.
 
 **Golden replays pin the rules.** `test/fixtures/golden-replays.jsonl.gz` holds 40
 recorded games with a digest of the position after every action and of the legal

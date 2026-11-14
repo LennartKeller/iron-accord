@@ -35,6 +35,14 @@ export interface ActionOption {
 export interface GameOptions {
   /** Victory rule values by rule id; anything omitted keeps the script default. */
   victoryRules?: Record<string, number[]>;
+  /**
+   * Pick up a position that is already under way instead of starting a game:
+   * the map is taken as the state at the START of `currentPlayer`'s turn on
+   * `day`, with that turn's income, upkeep and repairs already applied, so
+   * none of them runs again. Used to replay a single turn from a Commander
+   * Wars record (src/game/upstream.node.ts).
+   */
+  resume?: { day: number; currentPlayer: number };
 }
 
 export type GameOverReason = 'hq-captured' | 'no-units' | 'rule';
@@ -107,7 +115,13 @@ export class Game {
     }
     rules.onGameStart();
 
-    this.beginTurn(this.currentPlayer);
+    if (options.resume) {
+      this.currentPlayerIndex = options.resume.currentPlayer;
+      this.map.currentPlayerIndex = options.resume.currentPlayer;
+      this.day = options.resume.day;
+    } else {
+      this.beginTurn(this.currentPlayer);
+    }
     this.map.vision.update();
   }
 
@@ -406,6 +420,21 @@ export class Game {
     this.map.vision.update();
     this.checkGameOver();
     return true;
+  }
+
+  /**
+   * Performs an action that Commander Wars itself recorded, exactly as given.
+   *
+   * No legality check and no input-step driving: the record is the real game's
+   * own output, so the action is by definition one it accepted, and its buffer
+   * already holds every input. Refusing or re-deriving anything here would hide
+   * precisely the disagreements a differential replay exists to find. Never
+   * reachable from play — players and agents go through performAction.
+   */
+  performRecorded(action: GameAction): boolean {
+    if (this.over) return false;
+    const target = action.getActionTarget();
+    return this.runPrepared(action, action.getTargetUnit(), target);
   }
 
   // --- transport ----------------------------------------------------------
@@ -844,7 +873,6 @@ export class Game {
    */
   private beginTurn(player: Player, neutralTurn = true): void {
     player.expireVisionFields();
-    for (const unit of player.units) unit.hasMoved = false;
     player.funds += this.calcIncome(player);
 
     for (let y = 0; y < this.map.height; y++) {
@@ -901,6 +929,14 @@ export class Game {
     this.animations?.flush(this.map);
     this.animations?.clearCreated();
     this.cleanupDead();
+    // game/gamemap.cpp: GameMap::endOfTurn finishes with enableUnits(pPlayer).
+    // Units are readied when their owner's turn ENDS, not when the next one
+    // begins, so during an opponent's turn every unit on the board reads as
+    // unmoved. Scripts and the AI ask enemy units getHasMoved(), and resetting
+    // at the start of the turn instead made a unit that had just moved look
+    // spent to its enemy for a whole turn. Only units on the board: cargo keeps
+    // its flag, exactly as enableUnits walks tiles and never looks inside a hold.
+    for (const unit of player.units) unit.hasMoved = false;
   }
 
   /** Units of the current player that still have something to do. */

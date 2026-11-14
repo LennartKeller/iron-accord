@@ -26,10 +26,10 @@ const activeRules = (map: GameMap): string[] => {
 
 describe('victory rules', () => {
   it('runs the rule scripts rather than a reimplementation', () => {
-    // All ten ship in gamerules/victory/; the two Commander Wars defaults to on
+    // All twelve ship in gamerules/victory/; the two Commander Wars defaults to on
     // are the two that survive GameRules::onGameStart.
     const { map } = newGame();
-    expect(describeVictoryRules(map, registry)).toHaveLength(10);
+    expect(describeVictoryRules(map, registry)).toHaveLength(12);
     expect(activeRules(map)).toEqual(['VICTORYRULE_NOHQ', 'VICTORYRULE_NOUNITS']);
   });
 

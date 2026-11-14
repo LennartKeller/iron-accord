@@ -4,9 +4,7 @@ import type { Terrain } from './terrain.ts';
 import type { QPoint } from './globals.ts';
 import { GameEnums, MAX_UNIT_HP } from './enums.ts';
 import { ScriptVariables } from './variables.ts';
-
-const clamp = (value: number, min: number, max: number) =>
-  value < min ? min : (max > 0 && value > max ? max : value);
+import { gridFloor, HP_PRECISION } from './precision.ts';
 
 /**
  * Host-side Unit. Mirrors the Q_INVOKABLE surface of game/unit.h that the
@@ -20,9 +18,12 @@ export class Unit {
    * there and why clearing it is a write of zero rather than of the real hp.
    */
   virtualHp = 0;
-  ammo1 = 0; maxAmmo1 = 0; weapon1ID = '';
-  ammo2 = 0; maxAmmo2 = 0; weapon2ID = '';
-  fuel = 0; maxFuel = 0;
+  // game/unit.h starts all six at -1, and the setters below depend on it: a
+  // script's init() calls setFuel before setMaxFuel, so what that first call
+  // does is decided by the -1 it finds.
+  ammo1 = -1; maxAmmo1 = -1; weapon1ID = '';
+  ammo2 = -1; maxAmmo2 = -1; weapon2ID = '';
+  fuel = -1; maxFuel = -1;
   baseMovementPoints = 0;
   minRange = 1; maxRange = 1;
   vision = 1; visionHigh = 0;
@@ -87,22 +88,49 @@ export class Unit {
     this.y = y;
     this.uid = map.nextUnitUid();
     map.registry[unitID]?.init?.(this, map);
+    // game/unit.cpp: Unit::initUnit re-applies what init() set now that the
+    // capacities are known, then the constructor fills the unit up.
+    this.setFuel(this.fuel);
+    this.setAmmo1(this.ammo1);
+    this.setAmmo2(this.ammo2);
+    this.setHp(this.hp);
+    this.setFuel(this.maxFuel);
+    this.setAmmo1(this.maxAmmo1);
+    this.setAmmo2(this.maxAmmo2);
   }
 
   // --- setters called from a unit script's init() ---
-  setAmmo1(v: number) { this.ammo1 = clamp(v, 0, this.maxAmmo1); }
+  /**
+   * game/unit.cpp: Unit::setAmmo1 / setAmmo2. Negative is floored at zero only
+   * when the weapon has a magazine; the cap applies always.
+   */
+  setAmmo1(v: number) {
+    this.ammo1 = v < 0 && this.maxAmmo1 > 0 ? 0 : v;
+    if (this.ammo1 > this.maxAmmo1) this.ammo1 = this.maxAmmo1;
+  }
   setMaxAmmo1(v: number) { this.maxAmmo1 = v; }
   setWeapon1ID(v: string) { this.weapon1ID = v; }
-  setAmmo2(v: number) { this.ammo2 = clamp(v, 0, this.maxAmmo2); }
+  setAmmo2(v: number) {
+    this.ammo2 = v < 0 && this.maxAmmo2 > 0 ? 0 : v;
+    if (this.ammo2 > this.maxAmmo2) this.ammo2 = this.maxAmmo2;
+  }
   setMaxAmmo2(v: number) { this.maxAmmo2 = v; }
   setWeapon2ID(v: string) { this.weapon2ID = v; }
   /**
-   * game/unit.cpp: Unit::setFuel clamps against maxFuel but NOT against zero —
-   * fuel is allowed to go negative, and GameMap::checkFuel destroys those units
-   * at their owner's next turn. Flooring at zero here is what made aircraft
-   * immortal.
+   * game/unit.cpp: Unit::setFuel. Two things are easy to get wrong.
+   *
+   * It caps at maxFuel but NOT at zero — fuel may go negative, and
+   * GameMap::checkFuel destroys those units at their owner's next turn.
+   * Flooring at zero is what once made aircraft immortal.
+   *
+   * And it only ASSIGNS when the unit has a tank (maxFuel > 0). A unit without
+   * one keeps whatever it had, which is the -1 it was created with: a water
+   * mine reads fuel -1, not the 0 its script appears to set.
    */
-  setFuel(v: number) { this.fuel = this.maxFuel > 0 ? Math.min(v, this.maxFuel) : v; }
+  setFuel(v: number) {
+    if (this.maxFuel > 0) this.fuel = v;
+    if (this.fuel > this.maxFuel) this.fuel = this.maxFuel;
+  }
   setMaxFuel(v: number) { this.maxFuel = v; }
   setBaseMovementPoints(v: number) { this.baseMovementPoints = v; }
   setBaseMovementPointsHigh(v: number) { this.baseMovementPoints = v; }
@@ -120,8 +148,8 @@ export class Unit {
    * keeping the two in sync masked the fallback below, so a cleared override
    * read as zero hp instead of as "no override".
    */
-  setHp(v: number) { this.hp = Math.min(v, MAX_UNIT_HP); }
-  setVirtualHpValue(v: number) { this.virtualHp = v; }
+  setHp(v: number) { this.hp = Math.min(gridFloor(v, HP_PRECISION), MAX_UNIT_HP); }
+  setVirtualHpValue(v: number) { this.virtualHp = gridFloor(v, HP_PRECISION); }
   setCapturePoints(v: number) { this.capturePoints = v; }
   setHasMoved(v: boolean) { this.hasMoved = v; }
   showCustomRange(...args: unknown[]) { this.customRange = args; }
@@ -346,7 +374,7 @@ export class Unit {
    */
   moveUnitAction(action: { getCosts(): number; getMovePath(): Array<{ x: number; y: number }> }): void {
     const cost = Math.max(0, action.getCosts());
-    this.fuel = Math.max(0, this.fuel - cost);
+    this.setFuel(Math.max(0, this.fuel - cost));
     // game/unit.cpp: Unit::moveUnit only relocates when the path has more than
     // one point. Relocating unconditionally would re-run moveUnitToField for a
     // unit acting in place — which now resets capture points, so a capture

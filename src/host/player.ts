@@ -167,7 +167,18 @@ export class Player {
 
   /** CO power meters are not implemented; battle calls this on every hit. */
   gainPowerstar(): void {}
-  buildedUnit(): void {}
+  /**
+   * game/player.cpp: Player::buildedUnit — the production actions call this
+   * with the unit they just made, and it runs that unit's own `buildedUnit`
+   * hook. Submarines, stealth bombers and missile subs use it to leave the
+   * factory already dived or cloaked; as a no-op they came out in plain view.
+   * (The CO half of the C++ is omitted along with COs.)
+   */
+  buildedUnit(unit?: { getUnitID(): string } | null): void {
+    if (!unit) return;
+    try { this.map.registry[unit.getUnitID()]?.buildedUnit?.(unit, this, this.map); }
+    catch (error) { console.warn(`${unit.getUnitID()}.buildedUnit failed`, error); }
+  }
   postBattleActions(): void {}
 
   addFunds(amount: number): void { this.funds += amount; }
