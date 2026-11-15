@@ -1133,8 +1133,8 @@ async function maybeRunAI(): Promise<void> {
     let guard = 0;
     let acting = -1;
     while (isCurrent() && game && !game.over && currentSeatIsAI() && guard++ < 500) {
-      const legal = enumerateActions(game, { maxFieldChoices: 8 });
       const seat = agentFor(game.currentPlayerIndex);
+      const legal = seat.usesLegalActions === false ? [] : enumerateActions(game, { maxFieldChoices: 8 });
       if (acting !== game.currentPlayerIndex) {
         acting = game.currentPlayerIndex;
         await seat.beginTurn?.(runningEnv);
@@ -1823,10 +1823,14 @@ function renderSeats(draft: GameConfig, scene: Scene): void {
     // Controller and opponent share a cell: the opponent picker is meaningless
     // for a human seat, so it appears only when one is needed.
     const controlCell = document.createElement('td');
-    const opponent = select(Object.keys(AGENTS), seat.agent ?? 'heuristic',
+    // The shipped value net was trained before the damage formula was fixed, so
+    // it prices fights by rules the game no longer has. It stays loadable for a
+    // saved battle that uses it and is otherwise not offered until retrained.
+    const offered = Object.keys(AGENTS).filter(key => key !== 'valuenet' || seat.agent === 'valuenet');
+    const opponent = select(offered, seat.agent ?? 'heuristic',
       value => { seat.agent = value; }, {
         heuristic: 'Greedy (fast)', commanderwars: 'Commander Wars', coordinated: 'Coordinated (experimental)',
-        planner: 'Planner', valuenet: 'Planner + value net',
+        planner: 'Planner', valuenet: 'Planner + value net (outdated model)',
       });
     opponent.hidden = seat.controller !== 'ai';
     controlCell.append(select(['human', 'ai'], seat.controller, value => {

@@ -298,12 +298,7 @@ export class Unit {
       this, position.x, position.y, defender, defPosition.x, defPosition.y, isDefender, action, luckMode, this.map);
     if (typeof own === 'number') bonus += Math.trunc(own);
     // Every building the owner holds can add a flat bonus -- a tower's +10.
-    for (let y = 0; y < this.map.height; y++) {
-      for (let x = 0; x < this.map.width; x++) {
-        const owned = this.map.getTerrain(x, y).getBuilding();
-        if (owned && owned.getOwner() === this.owner) bonus += owned.getOffensiveBonus();
-      }
-    }
+    bonus += this.owner.getBuildingOffensiveBonus();
     if (!this.getWeatherImmune()) {
       bonus += this.map.getGameRules().getCurrentWeather().getOffensiveModifier();
     }

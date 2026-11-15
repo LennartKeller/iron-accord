@@ -269,6 +269,11 @@ describe('rules corrected against Commander Wars', () => {
     expect(bonus()).toBe(before + 10);
     tower.setOwner(enemy);
     expect(bonus()).toBe(before);
+    // The sum is cached per player; a capture and a demolition must both refresh it.
+    tower.setUnitOwner(attacker);
+    expect(bonus()).toBe(before + 10);
+    site.building = null;
+    expect(bonus()).toBe(before);
   });
 
   it('takes a terrain\'s attack modifier from the tile the unit stands on, not the one it fires from', () => {

@@ -24,6 +24,7 @@ const integer = (value: unknown): value is number =>
  */
 export class CoordinatedAi implements Agent {
   readonly name = 'coordinated';
+  readonly usesLegalActions = false;
   private readonly fallback: NormalAi;
   private day = -1;
   private player = -1;

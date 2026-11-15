@@ -92,6 +92,8 @@ export class GameMap {
 
   /** Bumped whenever a tile's identity changes; see the note above. */
   boardVersion = 0;
+  /** Bumped when a building changes hands; with boardVersion it keys per-player building sums. */
+  ownershipVersion = 0;
   private moveCostVersion = -1;
   private readonly moveCostEntries = new Map<string, MoveCostEntry>();
   /** Movement type per unit id; every unit script answers with a constant. */

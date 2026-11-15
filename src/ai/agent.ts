@@ -16,6 +16,12 @@ export interface Agent {
    * for agents that only implement part of the action space.
    */
   selectAction(env: GameEnvironment, legal: ActionDescriptor[]): ActionDescriptor | null | Promise<ActionDescriptor | null>;
+  /**
+   * False for an agent that decides without the list of legal moves. Building
+   * that list costs about as much as such an agent's own thinking, so the match
+   * loops skip it and pass an empty list.
+   */
+  readonly usesLegalActions?: boolean;
   /** Optional hook at the start of each of this agent's turns. */
   beginTurn?(env: GameEnvironment): void | Promise<void>;
 }
@@ -52,7 +58,7 @@ export async function playMatch(
       lastPlayer = player;
     }
 
-    const legal = env.legalActions();
+    const legal = agent.usesLegalActions === false ? [] : env.legalActions();
     const chosen = (await agent.selectAction(env, legal)) ?? { kind: 'endTurn' as const };
     options.onStep?.(steps, chosen, player);
     env.step(chosen);

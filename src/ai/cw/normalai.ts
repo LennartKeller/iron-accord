@@ -74,6 +74,7 @@ export interface NormalAiOptions {
  */
 export class NormalAi implements Agent {
   readonly name: string;
+  readonly usesLegalActions = false;
   private readonly config: NormalAiConfig;
   private core: CoreAI | null = null;
   private influence: InfluenceFrontMap | null = null;

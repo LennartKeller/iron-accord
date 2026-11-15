@@ -20,3 +20,4 @@ models/*
 !models/value.onnx
 !models/value.json
 __pycache__/
+runs/

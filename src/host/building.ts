@@ -25,7 +25,10 @@ export class BuildingHost {
   getBuildingID(): string { return this.buildingID; }
   getID(): string { return this.buildingID; }
   getOwner(): Player | null { return this.owner; }
-  setOwner(player: Player | null): void { this.owner = player; }
+  setOwner(player: Player | null): void {
+    this.owner = player;
+    this.map.ownershipVersion++;
+  }
   getTerrain(): Terrain | null { return this.terrain; }
   setTerrain(terrain: Terrain): void { this.terrain = terrain; }
   getX(): number { return this.terrain?.x ?? -1; }
@@ -177,6 +180,7 @@ export class BuildingHost {
   /** ACTION_CAPTURE hands ownership over by naming the capturing unit. */
   setUnitOwner(unit: { getOwner(): Player }): void {
     this.owner = unit.getOwner();
+    this.map.ownershipVersion++;
   }
 
   /**

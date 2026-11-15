@@ -3,6 +3,7 @@
  *
  *   npx vite-node tools/bench-normalai.ts
  *   NODES=400 MODEL=models/value.onnx npx vite-node tools/bench-normalai.ts
+ *   ONLY=net (the net series alone) or ONLY=coordinated, after the mirrors
  *
  * The point of the port was an opponent authored outside this project, so that
  * "0.867 against greedy" finally has an external referent. Structure follows
@@ -22,6 +23,7 @@ import { DEFAULT_PLANNER_OPTIONS } from '../src/ai/planner.ts';
 import { BudgetedValueNet, ValueNetPolicy } from '../src/ai/onnx-evaluator.ts';
 import { loadValueNet } from '../src/ai/valuenet.node.ts';
 import { NormalAi } from '../src/ai/cw/normalai.ts';
+import { CoordinatedAi } from '../src/ai/coordinated.ts';
 import { GameEnums } from '../src/host/index.ts';
 import { TRAIN_MAPS, VALIDATION_MAPS } from './tune-ai.ts';
 import type { Agent } from '../src/ai/agent.ts';
@@ -54,11 +56,12 @@ const policy = (() => {
   return new ValueNetPolicy(evaluator, meta.actionNames);
 })();
 
-type Side = 'normalai' | 'greedy' | 'plain' | 'net' | 'policy';
+type Side = 'normalai' | 'coordinated' | 'greedy' | 'plain' | 'net' | 'policy';
 
 function agentFor(side: Side, seed: number): Agent {
   switch (side) {
     case 'normalai': return new NormalAi({ seed });
+    case 'coordinated': return new CoordinatedAi({ seed });
     case 'greedy': return new HeuristicAgent();
     case 'plain':
       return new PlannerAgent({
@@ -167,10 +170,13 @@ if (!only) {
   await series('normalai v greedy', 'normalai', 'greedy', maps, fogs);
   await series('normalai v plain planner', 'normalai', 'plain', maps, fogs);
 }
-if (budgeted) await series('normalai v net planner', 'normalai', 'net', maps, fogs);
+if (!only || only === 'coordinated') {
+  await series('coordinated v normalai', 'coordinated', 'normalai', maps, fogs);
+}
+if (budgeted && only !== 'coordinated') await series('normalai v net planner', 'normalai', 'net', maps, fogs);
 // ONLY=net stops here: the policy series cost more than everything else
 // combined and policy guidance is already measured as harmful.
-if (policy && only !== 'net') {
+if (policy && !only) {
   // The teacher against its student: a net cloning NormalAi's actions should
   // land below it, and by how much is the number this dataset was built for.
   await series('normalai v policy planner', 'normalai', 'policy', maps, fogs);

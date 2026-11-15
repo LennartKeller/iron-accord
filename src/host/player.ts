@@ -80,6 +80,29 @@ export class Player {
     return new QmlVector(owned);
   }
 
+  private buildingBonus = { board: -1, ownership: -1, value: 0 };
+
+  /**
+   * What Unit::getBonusOffensive adds for the buildings this player holds: the
+   * sum of Building::getOffensiveBonus, which is a tower's +10. Every damage
+   * prediction asks for it, so the sum is kept until a building is placed,
+   * removed or changes hands.
+   */
+  getBuildingOffensiveBonus(): number {
+    const cache = this.buildingBonus;
+    if (cache.board !== this.map.boardVersion || cache.ownership !== this.map.ownershipVersion) {
+      let value = 0;
+      for (let y = 0; y < this.map.height; y++) {
+        for (let x = 0; x < this.map.width; x++) {
+          const building = this.map.getTerrain(x, y).getBuilding();
+          if (building && building.getOwner() === this) value += building.getOffensiveBonus();
+        }
+      }
+      this.buildingBonus = { board: this.map.boardVersion, ownership: this.map.ownershipVersion, value };
+    }
+    return this.buildingBonus.value;
+  }
+
   /**
    * game/player.cpp: Player::getBuildingListCount. An empty list counts every
    * building this player owns; `whitelist = false` inverts the match.
